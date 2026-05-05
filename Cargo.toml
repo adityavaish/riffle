@@ -1,0 +1,36 @@
+[package]
+name = "riffle"
+version = "0.1.0"
+edition = "2021"
+description = "Adaptive Delta Lake CDC streaming consumer with a real-time, tunable web dashboard"
+license = "Apache-2.0"
+repository = "https://github.com/your-org/riffle"
+readme = "README.md"
+keywords = ["delta-lake", "cdc", "streaming", "dashboard", "consumer"]
+categories = ["database", "command-line-utilities", "web-programming"]
+
+[dependencies]
+deltalake = { version = "0.22", features = ["datafusion", "azure", "s3", "gcs"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+arrow = { version = "53" }
+rand = "0.8"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.7"
+tokio-stream = "0.1"
+async-stream = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "riffle"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

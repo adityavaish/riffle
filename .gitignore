@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Riffle runtime artifacts
+/data/
+*.delta/
+checkpoint.json
+riffle-checkpoint.json
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets (never commit)
+.env
+.env.*
+!.env.example
