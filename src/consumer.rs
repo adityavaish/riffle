@@ -19,8 +19,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::sink::{self, SinkConfig, SinkOutcome};
 use crate::state::{
-    fmt_ckpt, ConsumerEvent, DiskCheckpoint, SharedState, TunableConfig,
+    fmt_ckpt, ConsumerEvent, DiskCheckpoint, SharedState, SinkEvent, TunableConfig,
 };
 
 const MAX_MERGE_VERSIONS: usize = 10;
@@ -38,6 +39,21 @@ pub async fn run(
     tunables: TunableConfig,
 ) -> Result<()> {
     let storage_options = cfg.storage_options()?;
+    let sink_cfg: Option<SinkConfig> = if cfg.sink_enabled {
+        Some(build_sink_config(&cfg)?)
+    } else {
+        None
+    };
+    {
+        let mut s = state.lock().await;
+        s.sink.enabled = cfg.sink_enabled;
+        if let Some(ref sc) = sink_cfg {
+            s.sink.mode = sc.mode.name().to_string();
+            s.sink.target_uri = sc.target_uri.clone();
+            s.sink.target_backend = format!("{:?}", cfg.target_backend());
+            s.sink.status = "Idle".to_string();
+        }
+    }
     let mut latencies: Vec<u64> = Vec::new();
 
     let (mut ckpt, fresh) = match load_checkpoint(&cfg.checkpoint_file) {
@@ -139,7 +155,30 @@ pub async fn run(
                     } else {
                         base_chunk
                     };
-                    process_work(chunk_rows).await;
+                    if let Some(ref sc) = sink_cfg {
+                        // When a real sink is configured, splitting a single source
+                        // version into row-bounded chunks would require row-precision
+                        // splitting of the source DataFrame (not yet supported here).
+                        // We process the whole version once on the first chunk and
+                        // skip the others — the loop still drives checkpoint advance.
+                        if idx == 0 {
+                            let outcome = run_sink(&state, sc, &table, &[v_info.version]).await?;
+                            tracing::info!(
+                                "[sink] v{} | mode={} | source_rows={} | inserts={} updates={} deletes={} appended={} | tgt v{} | {}ms",
+                                v_info.version,
+                                sc.mode.name(),
+                                outcome.source_rows,
+                                outcome.inserts,
+                                outcome.updates,
+                                outcome.deletes,
+                                outcome.appended,
+                                outcome.target_version,
+                                outcome.duration_ms,
+                            );
+                        }
+                    } else {
+                        process_work(chunk_rows).await;
+                    }
 
                     total_rows += chunk_rows;
                     chunks_processed += 1;
@@ -206,7 +245,24 @@ pub async fn run(
                     total_in_group += pending[group_end].rows;
                 }
 
-                process_work(total_in_group).await;
+                if let Some(ref sc) = sink_cfg {
+                    let versions: Vec<i64> = pending[i..=group_end].iter().map(|v| v.version).collect();
+                    let outcome = run_sink(&state, sc, &table, &versions).await?;
+                    tracing::info!(
+                        "[sink] versions={:?} | mode={} | source_rows={} | inserts={} updates={} deletes={} appended={} | tgt v{} | {}ms",
+                        versions,
+                        sc.mode.name(),
+                        outcome.source_rows,
+                        outcome.inserts,
+                        outcome.updates,
+                        outcome.deletes,
+                        outcome.appended,
+                        outcome.target_version,
+                        outcome.duration_ms,
+                    );
+                } else {
+                    process_work(total_in_group).await;
+                }
 
                 let latency = poll_start.elapsed().as_millis() as u64;
                 latencies.push(latency);
@@ -311,10 +367,77 @@ async fn update_consumer_state(
 
 /// Stand-in for the user's actual downstream work (e.g. MERGE INTO, S3 sink).
 /// Sleeps roughly proportionally to row count so the dashboard shows realistic
-/// latency. Replace with your real consumer logic.
+/// latency. Replace with your real consumer logic, or enable `--sink-enabled`.
 async fn process_work(rows: u64) {
     let ms = (rows / 1000).clamp(1, 5_000);
     tokio::time::sleep(Duration::from_millis(ms)).await;
+}
+
+fn build_sink_config(cfg: &Config) -> Result<SinkConfig> {
+    let mode = sink::parse_mode(
+        &cfg.sink_mode,
+        &cfg.merge_keys,
+        &cfg.merge_update_columns,
+        cfg.merge_update_predicate.clone(),
+        cfg.merge_delete_predicate.clone(),
+        cfg.merge_insert_predicate.clone(),
+    )?;
+    Ok(SinkConfig {
+        source_uri: cfg.table_uri.clone(),
+        target_uri: cfg.target_table_uri.clone(),
+        source_storage_options: cfg.storage_options()?,
+        target_storage_options: cfg.target_storage_options()?,
+        mode,
+    })
+}
+
+async fn run_sink(
+    state: &SharedState,
+    sink_cfg: &SinkConfig,
+    source: &deltalake::DeltaTable,
+    versions: &[i64],
+) -> Result<SinkOutcome> {
+    {
+        let mut s = state.lock().await;
+        s.sink.status = format!("Sinking {} version(s)...", versions.len());
+    }
+    let outcome = sink::apply(sink_cfg, source, versions).await?;
+    update_sink_state(state, sink_cfg, &outcome).await;
+    Ok(outcome)
+}
+
+async fn update_sink_state(
+    state: &SharedState,
+    sink_cfg: &SinkConfig,
+    outcome: &SinkOutcome,
+) {
+    let mut s = state.lock().await;
+    s.sink.status = "Idle".to_string();
+    s.sink.batches_processed += 1;
+    s.sink.total_inserts += outcome.inserts;
+    s.sink.total_updates += outcome.updates;
+    s.sink.total_deletes += outcome.deletes;
+    s.sink.total_appended += outcome.appended;
+    s.sink.target_version = outcome.target_version;
+    s.sink.last_duration_ms = outcome.duration_ms;
+    s.sink.last_source_rows = outcome.source_rows;
+    s.sink.events.push(SinkEvent {
+        timestamp: Utc::now().format("%H:%M:%S").to_string(),
+        mode: sink_cfg.mode.name().to_string(),
+        source_rows: outcome.source_rows,
+        inserts: outcome.inserts,
+        updates: outcome.updates,
+        deletes: outcome.deletes,
+        appended: outcome.appended,
+        target_version: outcome.target_version,
+        duration_ms: outcome.duration_ms,
+    });
+    if s.sink.events.len() > 50 {
+        s.sink.events.remove(0);
+    }
+    let n = s.sink.events.len() as u64;
+    let sum: u64 = s.sink.events.iter().map(|e| e.duration_ms).sum();
+    s.sink.avg_duration_ms = if n == 0 { 0 } else { sum / n };
 }
 
 pub fn load_checkpoint(path: &str) -> Option<DiskCheckpoint> {

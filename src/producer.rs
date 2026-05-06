@@ -13,13 +13,14 @@ use rand::{Rng, SeedableRng};
 use std::time::Instant;
 
 use crate::config::Config;
-use crate::sample_data::{build_schema, generate_batch};
+use crate::sample_data::{build_schema, generate_batch, EventIdRing};
 use crate::state::{ProducerEvent, SharedState};
 
 pub async fn run(state: SharedState, cfg: Config) -> Result<()> {
     let storage_options = cfg.storage_options()?;
     let schema = build_schema();
     let mut rng = StdRng::seed_from_u64(Utc::now().timestamp_millis() as u64);
+    let mut ring = EventIdRing::new(100_000);
     let mut batch_idx: usize = 0;
     let mut total_rows_so_far: u64 = 0;
     let start_time = Instant::now();
@@ -27,7 +28,14 @@ pub async fn run(state: SharedState, cfg: Config) -> Result<()> {
 
     loop {
         let rows_this_batch = rng.gen_range(cfg.batch_min_rows..=cfg.batch_max_rows);
-        let batch = generate_batch(&schema, rows_this_batch, batch_idx as i32, &mut rng)?;
+        let batch = generate_batch(
+            &schema,
+            rows_this_batch,
+            batch_idx as i32,
+            &mut rng,
+            &mut ring,
+            cfg.update_fraction,
+        )?;
 
         let write_start = Instant::now();
         let version = if batch_idx == 0 {

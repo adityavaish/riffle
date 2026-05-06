@@ -11,8 +11,45 @@ use arrow::record_batch::RecordBatch;
 use chrono::{TimeDelta, Utc};
 use rand::rngs::StdRng;
 use rand::Rng;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// Sliding ring of recently-emitted event_ids. The producer reuses ids drawn from
+/// this ring (with probability = `update_fraction`) so the MERGE sink has matched
+/// rows to UPDATE in the target table.
+pub struct EventIdRing {
+    capacity: usize,
+    ids: VecDeque<String>,
+}
+
+impl EventIdRing {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            ids: VecDeque::with_capacity(capacity.max(1)),
+        }
+    }
+
+    pub fn push(&mut self, id: String) {
+        if self.ids.len() == self.capacity {
+            self.ids.pop_front();
+        }
+        self.ids.push_back(id);
+    }
+
+    pub fn sample(&self, rng: &mut StdRng) -> Option<String> {
+        if self.ids.is_empty() {
+            return None;
+        }
+        let i = rng.gen_range(0..self.ids.len());
+        self.ids.get(i).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
 
 pub fn build_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -36,6 +73,8 @@ pub fn generate_batch(
     num_rows: usize,
     batch_id: i32,
     rng: &mut StdRng,
+    ring: &mut EventIdRing,
+    update_fraction: f64,
 ) -> Result<RecordBatch> {
     // Generic, vendor-neutral sample values.
     let event_types = ["create", "update", "delete", "refund", "credit"];
@@ -47,7 +86,24 @@ pub fn generate_batch(
 
     let now = Utc::now().naive_utc();
 
-    let event_ids: Vec<String> = (0..num_rows).map(|_| Uuid::new_v4().to_string()).collect();
+    // Build event_ids: with prob = update_fraction, reuse one from the ring so it
+    // becomes an UPDATE in the target. Otherwise mint a fresh UUID (an INSERT).
+    // We also remember which rows are updates so we can mark their status.
+    let uf = update_fraction.clamp(0.0, 1.0);
+    let mut event_ids: Vec<String> = Vec::with_capacity(num_rows);
+    let mut row_status_override: Vec<Option<&str>> = Vec::with_capacity(num_rows);
+    for _ in 0..num_rows {
+        let reuse = uf > 0.0 && rng.gen_bool(uf);
+        if let Some(existing) = if reuse { ring.sample(rng) } else { None } {
+            event_ids.push(existing);
+            row_status_override.push(Some("updated"));
+        } else {
+            let new_id = Uuid::new_v4().to_string();
+            ring.push(new_id.clone());
+            event_ids.push(new_id);
+            row_status_override.push(None);
+        }
+    }
     let account_ids: Vec<String> = (0..num_rows)
         .map(|_| format!("acct-{:08}", rng.gen_range(0u32..99_999_999)))
         .collect();
@@ -71,8 +127,11 @@ pub fn generate_batch(
     let eligible: Vec<bool> = (0..num_rows).map(|_| rng.gen_bool(0.85)).collect();
     let region_vals: Vec<&str> =
         (0..num_rows).map(|_| regions[rng.gen_range(0..regions.len())]).collect();
-    let status_vals: Vec<&str> =
-        (0..num_rows).map(|_| statuses[rng.gen_range(0..statuses.len())]).collect();
+    let status_vals: Vec<&str> = (0..num_rows)
+        .map(|i| {
+            row_status_override[i].unwrap_or_else(|| statuses[rng.gen_range(0..statuses.len())])
+        })
+        .collect();
 
     Ok(RecordBatch::try_new(
         schema.clone(),

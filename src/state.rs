@@ -41,6 +41,7 @@ pub struct ConfigSnapshot {
 pub struct DashboardState {
     pub producer: ProducerState,
     pub consumer: ConsumerState,
+    pub sink: SinkState,
     pub config: ConfigSnapshot,
     pub table_uri: String,
     pub backend: String,
@@ -91,6 +92,38 @@ pub struct ConsumerEvent {
     pub version: i64,
     pub new_rows: u64,
     pub latency_ms: u64,
+}
+
+#[derive(Clone, serde::Serialize, Default)]
+pub struct SinkState {
+    pub enabled: bool,
+    pub mode: String,
+    pub target_uri: String,
+    pub target_backend: String,
+    pub status: String,
+    pub target_version: i64,
+    pub batches_processed: u64,
+    pub total_inserts: u64,
+    pub total_updates: u64,
+    pub total_deletes: u64,
+    pub total_appended: u64,
+    pub last_duration_ms: u64,
+    pub avg_duration_ms: u64,
+    pub last_source_rows: u64,
+    pub events: Vec<SinkEvent>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct SinkEvent {
+    pub timestamp: String,
+    pub mode: String,
+    pub source_rows: u64,
+    pub inserts: u64,
+    pub updates: u64,
+    pub deletes: u64,
+    pub appended: u64,
+    pub target_version: i64,
+    pub duration_ms: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]

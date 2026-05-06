@@ -3,20 +3,14 @@
 //! Wires together: config → web server → SSE broadcaster → optional producer
 //! → adaptive consumer.
 
-mod config;
-mod consumer;
-mod producer;
-mod sample_data;
-mod state;
-mod web;
-
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-use crate::config::Config;
-use crate::state::{DashboardState, SharedState, TunableConfig};
+use riffle::config::Config;
+use riffle::state::{DashboardState, SharedState, TunableConfig};
+use riffle::{consumer, producer, web};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,6 +31,11 @@ async fn main() -> Result<()> {
     println!("Dashboard   : http://{}", cfg.bind_addr);
     println!("Producer    : {}", if cfg.producer_enabled { "enabled" } else { "disabled" });
     println!("Consumer    : {}", if cfg.consumer_enabled { "enabled" } else { "disabled" });
+    if cfg.sink_enabled {
+        println!("Sink        : enabled  mode={}  target={}", cfg.sink_mode, cfg.target_table_uri);
+    } else {
+        println!("Sink        : disabled");
+    }
     println!();
 
     let (tx, rx) = watch::channel(String::from("{}"));
