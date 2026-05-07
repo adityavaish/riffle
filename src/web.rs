@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use tokio::sync::watch;
 
-use crate::state::{ConfigSnapshot, TunableConfig};
+use crate::state::{ConfigSnapshot, SinkCommand, SinkLaunchConfig, TunableConfig};
 
 static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
@@ -18,14 +18,23 @@ static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 pub struct AppState {
     pub rx: watch::Receiver<String>,
     pub config: TunableConfig,
+    /// Optional channel used by `riffle-sink` to receive Start/Stop commands.
+    pub sink_cmd_tx: Option<tokio::sync::mpsc::Sender<SinkCommand>>,
 }
 
-pub async fn run(bind_addr: String, rx: watch::Receiver<String>, config: TunableConfig) -> Result<()> {
-    let app_state = AppState { rx, config };
+pub async fn run(
+    bind_addr: String,
+    rx: watch::Receiver<String>,
+    config: TunableConfig,
+    sink_cmd_tx: Option<tokio::sync::mpsc::Sender<SinkCommand>>,
+) -> Result<()> {
+    let app_state = AppState { rx, config, sink_cmd_tx };
     let app = Router::new()
         .route("/", get(serve_dashboard))
         .route("/events", get(sse_handler))
         .route("/api/config", get(get_config).post(update_config))
+        .route("/api/sink/start", axum::routing::post(start_sink))
+        .route("/api/sink/stop", axum::routing::post(stop_sink))
         .route("/api/health", get(|| async { "ok" }))
         .with_state(app_state);
 
@@ -87,4 +96,41 @@ async fn update_config(
         tracing::info!("[config] split_threshold_rows -> {}", v);
     }
     axum::Json(app_state.config.snapshot())
+}
+
+async fn start_sink(
+    State(app_state): State<AppState>,
+    JsonExt(cfg): JsonExt<SinkLaunchConfig>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let tx = app_state.sink_cmd_tx.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "sink controller not enabled".to_string(),
+    ))?;
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    tx.send(SinkCommand::Start(cfg, resp_tx))
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("send failed: {}", e)))?;
+    match resp_rx.await {
+        Ok(Ok(())) => Ok(axum::Json(serde_json::json!({"ok": true}))),
+        Ok(Err(e)) => Err((axum::http::StatusCode::BAD_REQUEST, e)),
+        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("recv failed: {}", e))),
+    }
+}
+
+async fn stop_sink(
+    State(app_state): State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let tx = app_state.sink_cmd_tx.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "sink controller not enabled".to_string(),
+    ))?;
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    tx.send(SinkCommand::Stop(resp_tx))
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("send failed: {}", e)))?;
+    match resp_rx.await {
+        Ok(Ok(())) => Ok(axum::Json(serde_json::json!({"ok": true}))),
+        Ok(Err(e)) => Err((axum::http::StatusCode::BAD_REQUEST, e)),
+        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("recv failed: {}", e))),
+    }
 }

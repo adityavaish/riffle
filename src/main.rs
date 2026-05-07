@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         let rx_for_web = rx.clone();
         let tunables_for_web = tunables.clone();
         tokio::spawn(async move {
-            if let Err(e) = web::run(bind, rx_for_web, tunables_for_web).await {
+            if let Err(e) = web::run(bind, rx_for_web, tunables_for_web, None).await {
                 eprintln!("[web error] {}", e);
             }
         });

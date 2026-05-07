@@ -118,7 +118,7 @@ pub struct Config {
 }
 
 /// The detected storage backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backend {
     LocalFs,
     Azure,

@@ -45,6 +45,8 @@ pub struct DashboardState {
     pub config: ConfigSnapshot,
     pub table_uri: String,
     pub backend: String,
+    /// "dashboard" (producer + consumer + optional sink) or "sink-cli" (sink only).
+    pub app_mode: String,
 }
 
 #[derive(Clone, serde::Serialize, Default)]
@@ -111,6 +113,12 @@ pub struct SinkState {
     pub avg_duration_ms: u64,
     pub last_source_rows: u64,
     pub events: Vec<SinkEvent>,
+    /// Whether a sink job is currently running.
+    pub running: bool,
+    /// Last error message (cleared when a new job starts).
+    pub last_error: String,
+    /// Last-applied launch config (echoed back to UI to pre-fill form).
+    pub launch_config: Option<SinkLaunchConfig>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -124,6 +132,51 @@ pub struct SinkEvent {
     pub appended: u64,
     pub target_version: i64,
     pub duration_ms: u64,
+}
+
+/// Launch parameters for a sink job, mirroring the CLI flags.
+/// Sent from the web UI (POST /api/sink/start) or constructed from CLI args.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct SinkLaunchConfig {
+    pub source_uri: String,
+    pub target_uri: String,
+    pub sink_mode: String,
+    #[serde(default)]
+    pub merge_keys: String,
+    #[serde(default)]
+    pub merge_update_columns: String,
+    #[serde(default)]
+    pub merge_update_predicate: Option<String>,
+    #[serde(default)]
+    pub merge_delete_predicate: Option<String>,
+    #[serde(default)]
+    pub merge_insert_predicate: Option<String>,
+    #[serde(default)]
+    pub start_version: Option<i64>,
+    #[serde(default)]
+    pub end_version: Option<i64>,
+    #[serde(default)]
+    pub once: bool,
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_max_versions")]
+    pub max_versions_per_batch: usize,
+    #[serde(default = "default_azure_auth")]
+    pub azure_auth: String,
+    #[serde(default = "default_checkpoint")]
+    pub checkpoint_file: String,
+}
+
+fn default_poll_interval() -> u64 { 5 }
+fn default_max_versions() -> usize { 10 }
+fn default_azure_auth() -> String { "auto".to_string() }
+fn default_checkpoint() -> String { "./riffle-sink-ckpt.json".to_string() }
+
+/// Commands sent from the web layer to the sink controller task.
+#[derive(Debug)]
+pub enum SinkCommand {
+    Start(SinkLaunchConfig, tokio::sync::oneshot::Sender<Result<(), String>>),
+    Stop(tokio::sync::oneshot::Sender<Result<(), String>>),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]

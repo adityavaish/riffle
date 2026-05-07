@@ -39,6 +39,77 @@
     <h1>⚡ Riffle — Delta Lake CDC Dashboard</h1>
     <div class="sub"><span id="hdr-backend">—</span> · <span id="hdr-uri">—</span></div>
 
+    <div class="card" id="sink-config-card" style="margin-bottom:20px; display:none">
+        <h2>🛠️ Sink Configuration</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Source URI</label>
+                <input id="cfg-source" type="text" placeholder="abfss://... or ./local.delta"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Target URI</label>
+                <input id="cfg-target" type="text" placeholder="abfss://... or ./target.delta"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Mode</label>
+                <select id="cfg-mode" style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px">
+                    <option value="merge">merge (upsert via keys)</option>
+                    <option value="append">append</option>
+                    <option value="overwrite">overwrite</option>
+                </select>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Merge Keys (comma-sep, required for merge)</label>
+                <input id="cfg-keys" type="text" placeholder="id, BalanceId"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Max versions per batch</label>
+                <input id="cfg-batch" type="number" value="10" min="1" max="100"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Poll interval (s)</label>
+                <input id="cfg-poll" type="number" value="5" min="1" max="3600"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Azure auth</label>
+                <select id="cfg-auth" style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px">
+                    <option value="auto">auto (sp → msi → cli)</option>
+                    <option value="cli">cli (Azure CLI / VS Code)</option>
+                    <option value="msi">msi (Managed Identity)</option>
+                    <option value="sp">sp (Service Principal env)</option>
+                </select>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Checkpoint file</label>
+                <input id="cfg-ckpt" type="text" value="./riffle-sink-ckpt.json"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Start version (optional)</label>
+                <input id="cfg-startv" type="number" placeholder="resume from checkpoint"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+            </div>
+            <div>
+                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">End version (optional)</label>
+                <input id="cfg-endv" type="number" placeholder="follow indefinitely"
+                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
+            </div>
+            <div style="grid-column: span 2">
+                <label style="color:#8b949e;font-size:13px"><input id="cfg-once" type="checkbox" style="vertical-align:middle"/> Process one batch and stop (--once)</label>
+            </div>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+            <button id="sink-start" style="padding:10px 20px;background:#238636;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600">▶ Start</button>
+            <button id="sink-stop" style="padding:10px 20px;background:#da3633;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600" disabled>■ Stop</button>
+            <span id="sink-cfg-status" style="color:#8b949e;font-size:13px"></span>
+        </div>
+    </div>
+
     <div class="stats-row">
         <div class="stat-box"><div class="stat-value" id="total-produced">0</div><div class="stat-label">Rows Produced</div></div>
         <div class="stat-box"><div class="stat-value" id="total-consumed">0</div><div class="stat-label">Rows Consumed</div></div>
@@ -71,6 +142,22 @@
             <div class="metric"><span class="metric-label">Max Chunk Size</span><span class="metric-value"><span id="consumer-chunk-target">—</span> rows</span></div>
             <div class="metric"><span class="metric-label">Merge / Split Thresholds</span><span class="metric-value"><span id="consumer-merge-th">—</span> / <span id="consumer-split-th">—</span></span></div>
             <div class="progress-bar"><div class="progress-fill consumer" id="consumer-progress" style="width:0%"></div></div>
+        </div>
+
+        <div class="card" id="sink-card" style="display:none">
+            <h2>🪣 Sink (Delta → Delta)</h2>
+            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span id="sink-status" class="status">—</span></span></div>
+            <div class="metric"><span class="metric-label">Mode</span><span class="metric-value" id="sink-mode">—</span></div>
+            <div class="metric"><span class="metric-label">Target URI</span><span class="metric-value" id="sink-target" style="font-size:11px;word-break:break-all;text-align:right;max-width:60%">—</span></div>
+            <div class="metric"><span class="metric-label">Target Version</span><span class="metric-value" id="sink-version">—</span></div>
+            <div class="metric"><span class="metric-label">Batches Processed</span><span class="metric-value" id="sink-batches">0</span></div>
+            <div class="metric"><span class="metric-label">Total Inserts</span><span class="metric-value" id="sink-inserts">0</span></div>
+            <div class="metric"><span class="metric-label">Total Updates</span><span class="metric-value" id="sink-updates">0</span></div>
+            <div class="metric"><span class="metric-label">Total Deletes</span><span class="metric-value" id="sink-deletes">0</span></div>
+            <div class="metric"><span class="metric-label">Total Appended</span><span class="metric-value" id="sink-appended">0</span></div>
+            <div class="metric"><span class="metric-label">Last Source Rows</span><span class="metric-value" id="sink-last-rows">0</span></div>
+            <div class="metric"><span class="metric-label">Last Duration</span><span class="metric-value"><span id="sink-last-ms">—</span> ms</span></div>
+            <div class="metric"><span class="metric-label">Avg Duration</span><span class="metric-value"><span id="sink-avg-ms">—</span> ms</span></div>
         </div>
     </div>
 
@@ -106,6 +193,7 @@
     <div class="grid">
         <div class="card"><h2>Producer Events</h2><div class="events" id="producer-events"></div></div>
         <div class="card"><h2>Consumer Events</h2><div class="events" id="consumer-events"></div></div>
+        <div class="card" id="sink-events-card" style="display:none"><h2>Sink Events</h2><div class="events" id="sink-events"></div></div>
     </div>
 
     <script>
@@ -116,6 +204,21 @@
             const p = d.producer || {};
             const c = d.consumer || {};
             const cfg = d.config || {};
+            const isSinkOnly = d.app_mode === 'sink-cli';
+
+            // Hide producer/consumer cards entirely in sink-cli mode; show config card.
+            document.querySelectorAll('.card').forEach(card => {
+                const h2 = card.querySelector('h2');
+                if (!h2) return;
+                const t = h2.textContent;
+                if (isSinkOnly && (t.includes('Producer') || t.includes('Consumer') || t.includes('Tuning'))) {
+                    card.style.display = 'none';
+                }
+            });
+            if (isSinkOnly) {
+                document.querySelectorAll('.stat-box').forEach(b => b.style.display = 'none');
+                document.getElementById('sink-config-card').style.display = '';
+            }
 
             document.getElementById('hdr-backend').textContent = d.backend || '—';
             document.getElementById('hdr-uri').textContent = d.table_uri || '—';
@@ -168,6 +271,54 @@
                 const badge = ev.mode === 'merged' ? '🔗' : ev.mode === 'split' ? '✂️' : '▪️';
                 return `<div class="event-row"><span class="event-time">${ev.timestamp}</span><span class="event-detail">${badge} ${ev.mode} | ${ev.range} | +${ev.new_rows.toLocaleString()} rows | ${ev.latency_ms}ms</span></div>`;
             }).join('');
+
+            const sk = d.sink || {};
+            const sinkCard = document.getElementById('sink-card');
+            const sinkEventsCard = document.getElementById('sink-events-card');
+            if (sk.enabled) {
+                sinkCard.style.display = '';
+                sinkEventsCard.style.display = '';
+                const skStatus = document.getElementById('sink-status');
+                skStatus.textContent = sk.status || '—';
+                skStatus.className = 'status status-' + (sk.status||'').toLowerCase().replace(/[^a-z]/g,'');
+                document.getElementById('sink-mode').textContent = sk.mode || '—';
+                document.getElementById('sink-target').textContent = sk.target_uri || '—';
+                document.getElementById('sink-version').textContent = sk.target_version || '—';
+                document.getElementById('sink-batches').textContent = (sk.batches_processed||0).toLocaleString();
+                document.getElementById('sink-inserts').textContent = (sk.total_inserts||0).toLocaleString();
+                document.getElementById('sink-updates').textContent = (sk.total_updates||0).toLocaleString();
+                document.getElementById('sink-deletes').textContent = (sk.total_deletes||0).toLocaleString();
+                document.getElementById('sink-appended').textContent = (sk.total_appended||0).toLocaleString();
+                document.getElementById('sink-last-rows').textContent = (sk.last_source_rows||0).toLocaleString();
+                document.getElementById('sink-last-ms').textContent = sk.last_duration_ms || '—';
+                document.getElementById('sink-avg-ms').textContent = sk.avg_duration_ms || '—';
+                document.getElementById('sink-events').innerHTML = (sk.events||[]).slice(-20).reverse().map(ev => {
+                    const badge = ev.mode === 'merge' ? '🔀' : ev.mode === 'overwrite' ? '♻️' : '➕';
+                    return `<div class="event-row"><span class="event-time">${ev.timestamp}</span><span class="event-detail">${badge} ${ev.mode} | src=${(ev.source_rows||0).toLocaleString()} | ins=${(ev.inserts||0).toLocaleString()} upd=${(ev.updates||0).toLocaleString()} del=${(ev.deletes||0).toLocaleString()} app=${(ev.appended||0).toLocaleString()} | tgt v${ev.target_version} | ${ev.duration_ms}ms</span></div>`;
+                }).join('');
+            }
+
+            // Sink config form: enable/disable Start/Stop; pre-fill from launch_config.
+            if (isSinkOnly) {
+                const running = !!sk.running;
+                document.getElementById('sink-start').disabled = running;
+                document.getElementById('sink-stop').disabled = !running;
+                const lc = sk.launch_config;
+                if (lc && !window._sinkFormSeeded) {
+                    document.getElementById('cfg-source').value = lc.source_uri || '';
+                    document.getElementById('cfg-target').value = lc.target_uri || '';
+                    document.getElementById('cfg-mode').value = lc.sink_mode || 'merge';
+                    document.getElementById('cfg-keys').value = lc.merge_keys || '';
+                    document.getElementById('cfg-batch').value = lc.max_versions_per_batch || 10;
+                    document.getElementById('cfg-poll').value = lc.poll_interval_secs || 5;
+                    document.getElementById('cfg-auth').value = lc.azure_auth || 'auto';
+                    document.getElementById('cfg-ckpt').value = lc.checkpoint_file || './riffle-sink-ckpt.json';
+                    if (lc.start_version != null) document.getElementById('cfg-startv').value = lc.start_version;
+                    if (lc.end_version != null) document.getElementById('cfg-endv').value = lc.end_version;
+                    document.getElementById('cfg-once').checked = !!lc.once;
+                    window._sinkFormSeeded = true;
+                }
+            }
         }
 
         ['cfg-chunk','cfg-merge','cfg-split'].forEach(id => {
@@ -201,6 +352,52 @@
             ['cfg-chunk','cfg-merge','cfg-split'].forEach(id => { document.getElementById(id).dataset.touched = '1'; });
             applyConfig();
         });
+
+        async function startSink() {
+            const status = document.getElementById('sink-cfg-status');
+            const sv = document.getElementById('cfg-startv').value;
+            const ev = document.getElementById('cfg-endv').value;
+            const body = {
+                source_uri: document.getElementById('cfg-source').value.trim(),
+                target_uri: document.getElementById('cfg-target').value.trim(),
+                sink_mode: document.getElementById('cfg-mode').value,
+                merge_keys: document.getElementById('cfg-keys').value.trim(),
+                merge_update_columns: '',
+                max_versions_per_batch: parseInt(document.getElementById('cfg-batch').value, 10) || 10,
+                poll_interval_secs: parseInt(document.getElementById('cfg-poll').value, 10) || 5,
+                azure_auth: document.getElementById('cfg-auth').value,
+                checkpoint_file: document.getElementById('cfg-ckpt').value.trim() || './riffle-sink-ckpt.json',
+                start_version: sv === '' ? null : parseInt(sv, 10),
+                end_version: ev === '' ? null : parseInt(ev, 10),
+                once: document.getElementById('cfg-once').checked,
+            };
+            if (!body.source_uri || !body.target_uri) {
+                status.textContent = '❌ Source URI and Target URI are required.';
+                return;
+            }
+            status.textContent = 'Starting...';
+            try {
+                const res = await fetch('/api/sink/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                if (!res.ok) throw new Error(await res.text());
+                status.textContent = '✅ Job started.';
+                window._sinkFormSeeded = false; // allow re-seeding from server state
+                setTimeout(() => { status.textContent = ''; }, 4000);
+            } catch (e) { status.textContent = '❌ ' + e.message; }
+        }
+
+        async function stopSink() {
+            const status = document.getElementById('sink-cfg-status');
+            status.textContent = 'Stopping...';
+            try {
+                const res = await fetch('/api/sink/stop', { method:'POST' });
+                if (!res.ok) throw new Error(await res.text());
+                status.textContent = '✅ Job stopped.';
+                setTimeout(() => { status.textContent = ''; }, 4000);
+            } catch (e) { status.textContent = '❌ ' + e.message; }
+        }
+
+        document.getElementById('sink-start').addEventListener('click', startSink);
+        document.getElementById('sink-stop').addEventListener('click', stopSink);
     </script>
 </body>
 </html>

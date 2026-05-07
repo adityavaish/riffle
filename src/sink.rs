@@ -312,11 +312,12 @@ async fn apply_merge(
         spec.update_columns.clone()
     };
 
-    // Join predicate: target.k1 = source.k1 AND ...
+    // Join predicate: target."k1" = source."k1" AND ...
+    // Quoted to preserve case-sensitive column names (e.g. "BalanceId").
     let predicate_str = spec
         .keys
         .iter()
-        .map(|k| format!("target.{0} = source.{0}", k))
+        .map(|k| format!("target.\"{0}\" = source.\"{0}\"", k))
         .collect::<Vec<_>>()
         .join(" AND ");
 
@@ -341,7 +342,7 @@ async fn apply_merge(
                 u = u.predicate(p);
             }
             for c in &cols {
-                u = u.update(c.clone(), col(format!("source.{}", c)));
+                u = u.update(c.clone(), col(format!("source.\"{}\"", c)));
             }
             u
         })?;
@@ -356,7 +357,7 @@ async fn apply_merge(
                 i = i.predicate(p);
             }
             for c in &cols {
-                i = i.set(c.clone(), col(format!("source.{}", c)));
+                i = i.set(c.clone(), col(format!("source.\"{}\"", c)));
             }
             i
         })?;
