@@ -20,3 +20,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+riffle-sink-ckpt.json
+azure-sink-ckpt.json
+*-ckpt.json
