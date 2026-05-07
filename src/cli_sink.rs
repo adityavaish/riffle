@@ -1,4 +1,4 @@
-//! `riffle-sink` — Delta-to-Delta transfer with built-in web dashboard.
+//! `riffle sink` subcommand — Delta-to-Delta transfer with built-in web dashboard.
 //!
 //! Two modes of operation:
 //!
@@ -14,7 +14,6 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::Parser;
 use deltalake::{open_table_with_storage_options, DeltaTable};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -24,20 +23,15 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 
-use riffle::config::{build_storage_options, register_handlers_for, Backend};
-use riffle::sink::{self, SinkConfig, SinkOutcome};
-use riffle::state::{
+use crate::config::{build_storage_options, register_handlers_for, Backend};
+use crate::sink::{self, SinkConfig, SinkOutcome};
+use crate::state::{
     DashboardState, SharedState, SinkCommand, SinkEvent, SinkLaunchConfig, TunableConfig,
 };
-use riffle::web;
+use crate::web;
 
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "riffle-sink",
-    about = "Delta-to-Delta transfer (append/overwrite/merge) with live web dashboard",
-    version
-)]
-struct Args {
+#[derive(clap::Args, Debug, Clone)]
+pub struct SinkArgs {
     /// Source Delta table URI. Optional — if omitted, configure via dashboard.
     #[arg(long)]
     source_uri: Option<String>,
@@ -372,17 +366,8 @@ async fn update_sink_state(state: &SharedState, sink_cfg: &SinkConfig, outcome: 
     s.sink.avg_duration_ms = if n == 0 { 0 } else { sum / n };
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "riffle=info,warn".to_string());
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
-        .with_target(false)
-        .init();
-
-    let args = Args::parse();
-
-    println!("=== riffle-sink ===");
+pub async fn run(args: SinkArgs) -> Result<()> {
+    println!("=== riffle sink ===");
     println!("Dashboard : http://{}", args.dashboard_bind);
     println!();
 

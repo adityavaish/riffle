@@ -34,10 +34,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "riffle"
 path = "src/main.rs"
 
-[[bin]]
-name = "riffle-sink"
-path = "src/bin/riffle-sink.rs"
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -29,12 +29,38 @@ It works against any storage backend [delta-rs](https://github.com/delta-io/delt
 
 ---
 
+## Two subcommands
+
+Riffle ships as a single binary with two subcommands:
+
+```bash
+riffle sink   # Delta-to-Delta transfer (append/overwrite/merge) with live dashboard
+riffle demo   # Synthetic CDC producer + adaptive consumer demo with live dashboard
+```
+
+`riffle sink` can be invoked with no source/target — the dashboard opens at
+<http://127.0.0.1:3001> with a configuration form so you can start jobs from the UI.
+With `--source-uri` and `--target-uri`, the job auto-starts.
+
+```bash
+# Auto-start a streaming MERGE
+riffle sink \
+  --source-uri abfss://c@account.dfs.core.windows.net/source.delta \
+  --target-uri abfss://c@account.dfs.core.windows.net/target.delta \
+  --sink-mode merge --merge-keys id
+
+# Or start the dashboard only and configure from the UI
+riffle sink
+```
+
+---
+
 ## Quick start (zero cloud setup)
 
 ```bash
 git clone https://github.com/adityavaish/riffle
 cd riffle
-cargo run --release
+cargo run --release -- demo
 ```
 
 Open <http://localhost:3000>. The defaults create a Delta table at `./data/riffle-demo.delta` and start producing/consuming infinitely.
@@ -69,7 +95,7 @@ All settings can be passed as **CLI flags** or **environment variables** (see `.
 
 ```bash
 az login
-RIFFLE_TABLE_URI=abfss://mycontainer@myaccount.dfs.core.windows.net/path/to/table cargo run --release
+cargo run --release -- demo --table-uri abfss://mycontainer@myaccount.dfs.core.windows.net/path/to/table
 ```
 
 ### Azure (Managed Identity, e.g. inside an Azure VM/AKS)
@@ -77,7 +103,7 @@ RIFFLE_TABLE_URI=abfss://mycontainer@myaccount.dfs.core.windows.net/path/to/tabl
 ```bash
 RIFFLE_AZURE_AUTH=msi \
 RIFFLE_TABLE_URI=abfss://mycontainer@myaccount.dfs.core.windows.net/path/to/table \
-cargo run --release
+cargo run --release -- demo
 ```
 
 ### AWS S3
@@ -87,14 +113,14 @@ export AWS_REGION=us-east-1
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_S3_ALLOW_UNSAFE_RENAME=true   # required without a lock provider
-RIFFLE_TABLE_URI=s3://my-bucket/path/to/table cargo run --release
+cargo run --release -- demo --table-uri s3://my-bucket/path/to/table
 ```
 
 ### Google Cloud Storage
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
-RIFFLE_TABLE_URI=gs://my-bucket/path/to/table cargo run --release
+cargo run --release -- demo --table-uri gs://my-bucket/path/to/table
 ```
 
 ---
