@@ -220,8 +220,21 @@ impl Controller {
             c.store(true, Ordering::Relaxed);
         }
         if let Some(h) = self.handle.take() {
-            // Wait up to 30s for the loop to observe cancellation.
-            let _ = tokio::time::timeout(Duration::from_secs(30), h).await;
+            tracing::info!("[stream] stop requested; waiting up to 30s for cooperative cancel");
+            let abort_handle = h.abort_handle();
+            match tokio::time::timeout(Duration::from_secs(30), h).await {
+                Ok(_) => {
+                    tracing::info!("[stream] sink loop exited cleanly");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "[stream] sink loop did not exit within 30s (likely mid-merge); aborting hard"
+                    );
+                    abort_handle.abort();
+                    // Give the runtime a beat to actually drop the task before we return.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
         }
         self.cancel = None;
         let mut s = self.state.lock().await;
@@ -321,7 +334,39 @@ async fn run_sink_loop(
                 s.sink.status = format!("Streaming v{}..=v{}", group_start, group_end);
             }
             let t_apply = std::time::Instant::now();
-            let outcome = sink::apply(&sink_cfg, &source, &versions).await?;
+            // Heartbeat task: emit progress every 5s while sink::apply runs so users see the job is alive.
+            let hb_state = state.clone();
+            let hb_label = format!("v{}..=v{}", group_start, group_end);
+            let hb_mode = sink_cfg.mode.name().to_string();
+            let hb_done = Arc::new(AtomicBool::new(false));
+            let hb_done_b = hb_done.clone();
+            let hb = tokio::spawn(async move {
+                let start = std::time::Instant::now();
+                let mut tick: u64 = 0;
+                while !hb_done_b.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if hb_done_b.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    tick += 1;
+                    let secs = start.elapsed().as_secs();
+                    tracing::info!(
+                        "[stream] {} {} in progress... {}s elapsed",
+                        hb_mode,
+                        hb_label,
+                        secs
+                    );
+                    let mut s = hb_state.lock().await;
+                    s.sink.status = format!(
+                        "{} {} in progress ({}s, tick #{})",
+                        hb_mode, hb_label, secs, tick
+                    );
+                }
+            });
+            let outcome_res = sink::apply(&sink_cfg, &source, &versions).await;
+            hb_done.store(true, Ordering::Relaxed);
+            let _ = hb.await;
+            let outcome = outcome_res?;
             tracing::info!(
                 "[stream] applied v{}..=v{} in {}ms | src_rows={} ins={} upd={} del={} app={} | tgt=v{}",
                 group_start,
