@@ -1,4 +1,4 @@
-//! `riffle sink` subcommand — Delta-to-Delta transfer with built-in web dashboard.
+//! `riffle stream` subcommand — Delta-to-Delta streaming transformation with built-in web dashboard.
 //!
 //! Two modes of operation:
 //!
@@ -31,7 +31,7 @@ use crate::state::{
 use crate::web;
 
 #[derive(clap::Args, Debug, Clone)]
-pub struct SinkArgs {
+pub struct StreamArgs {
     /// Source Delta table URI. Optional — if omitted, configure via dashboard.
     #[arg(long)]
     source_uri: Option<String>,
@@ -74,7 +74,7 @@ pub struct SinkArgs {
     #[arg(long, default_value_t = 5)]
     poll_interval_secs: u64,
 
-    #[arg(long, default_value = "./riffle-sink-ckpt.json")]
+    #[arg(long, default_value = "./riffle-stream-ckpt.json")]
     checkpoint_file: PathBuf,
 
     #[arg(long, default_value_t = 10)]
@@ -245,19 +245,35 @@ async fn run_sink_loop(
             .map(|c| c.last_sunk_version)
             .unwrap_or(-1),
     };
-    tracing::info!("[sink-cli] resuming after v{}", last_sunk);
+    tracing::info!(
+        "[stream] starting loop: source={} target={} mode={} poll_interval={}s max_versions_per_batch={} resume_after_v{}",
+        launch.source_uri,
+        sink_cfg.target_uri,
+        sink_cfg.mode.name(),
+        launch.poll_interval_secs,
+        launch.max_versions_per_batch,
+        last_sunk
+    );
 
     loop {
         if cancel.load(Ordering::Relaxed) {
-            tracing::info!("[sink-cli] cancellation requested, exiting loop");
+            tracing::info!("[stream] cancellation requested, exiting loop");
             return Ok(());
         }
 
+        tracing::debug!("[stream] opening source table to detect latest version: {}", launch.source_uri);
+        let t_open = std::time::Instant::now();
         let source: DeltaTable =
             open_table_with_storage_options(&launch.source_uri, source_storage_options.clone())
                 .await
                 .with_context(|| format!("open source {}", launch.source_uri))?;
         let current_version = source.version();
+        tracing::debug!(
+            "[stream] source opened in {}ms; current_version=v{} last_sunk=v{}",
+            t_open.elapsed().as_millis(),
+            current_version,
+            last_sunk
+        );
         let cap = launch
             .end_version
             .unwrap_or(current_version)
@@ -265,9 +281,10 @@ async fn run_sink_loop(
 
         if last_sunk >= cap {
             if launch.once {
-                tracing::info!("Up to date (v{}). Exiting (--once).", current_version);
+                tracing::info!("[stream] up to date (v{}). Exiting (--once).", current_version);
                 return Ok(());
             }
+            tracing::debug!("[stream] caught up at v{}; sleeping {}s before next poll", current_version, launch.poll_interval_secs);
             {
                 let mut s = state.lock().await;
                 s.sink.status = format!("Idle (caught up at v{})", current_version);
@@ -293,29 +310,31 @@ async fn run_sink_loop(
                 (group_start + launch.max_versions_per_batch as i64 - 1).min(cap);
             let versions: Vec<i64> = (group_start..=group_end).collect();
             tracing::info!(
-                "[sink-cli] applying versions {}..={} (mode={})",
+                "[stream] applying versions v{}..=v{} ({} versions, mode={})",
                 group_start,
                 group_end,
+                versions.len(),
                 sink_cfg.mode.name()
             );
             {
                 let mut s = state.lock().await;
-                s.sink.status = format!("Sinking v{}..=v{}", group_start, group_end);
+                s.sink.status = format!("Streaming v{}..=v{}", group_start, group_end);
             }
+            let t_apply = std::time::Instant::now();
             let outcome = sink::apply(&sink_cfg, &source, &versions).await?;
-            update_sink_state(&state, &sink_cfg, &outcome).await;
             tracing::info!(
-                "v{}-v{} | rows={} ins={} upd={} del={} app={} | tgt v{} | {}ms",
+                "[stream] applied v{}..=v{} in {}ms | src_rows={} ins={} upd={} del={} app={} | tgt=v{}",
                 group_start,
                 group_end,
+                t_apply.elapsed().as_millis(),
                 outcome.source_rows,
                 outcome.inserts,
                 outcome.updates,
                 outcome.deletes,
                 outcome.appended,
-                outcome.target_version,
-                outcome.duration_ms
+                outcome.target_version
             );
+            update_sink_state(&state, &sink_cfg, &outcome).await;
             last_sunk = group_end;
             save_checkpoint(
                 &ckpt_path,
@@ -366,16 +385,16 @@ async fn update_sink_state(state: &SharedState, sink_cfg: &SinkConfig, outcome: 
     s.sink.avg_duration_ms = if n == 0 { 0 } else { sum / n };
 }
 
-pub async fn run(args: SinkArgs) -> Result<()> {
-    println!("=== riffle sink ===");
+pub async fn run(args: StreamArgs) -> Result<()> {
+    println!("=== riffle stream ===");
     println!("Dashboard : http://{}", args.dashboard_bind);
     println!();
 
-    // Shared dashboard state, always sink-cli mode.
+    // Shared dashboard state, always stream-cli mode.
     let state: SharedState = Arc::new(Mutex::new(DashboardState::default()));
     {
         let mut s = state.lock().await;
-        s.app_mode = "sink-cli".to_string();
+        s.app_mode = "stream-cli".to_string();
         s.sink.enabled = true;
         s.sink.status = "Idle (no job running)".to_string();
         s.sink.running = false;

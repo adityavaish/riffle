@@ -40,7 +40,7 @@
     <div class="sub"><span id="hdr-backend">—</span> · <span id="hdr-uri">—</span></div>
 
     <div class="card" id="sink-config-card" style="margin-bottom:20px; display:none">
-        <h2>🛠️ Sink Configuration</h2>
+        <h2>🛠️ Stream Configuration</h2>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
             <div>
                 <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Source URI</label>
@@ -86,7 +86,7 @@
             </div>
             <div>
                 <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Checkpoint file</label>
-                <input id="cfg-ckpt" type="text" value="./riffle-sink-ckpt.json"
+                <input id="cfg-ckpt" type="text" value="./riffle-stream-ckpt.json"
                     style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
             </div>
             <div>
@@ -104,10 +104,10 @@
             </div>
         </div>
         <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
-            <button id="sink-start" style="padding:10px 20px;background:#238636;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600">▶ Start</button>
-            <button id="sink-stop" style="padding:10px 20px;background:#da3633;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600" disabled>■ Stop</button>
+            <button id="sink-toggle" data-state="idle" style="padding:10px 20px;background:#238636;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600">▶ Start</button>
             <span id="sink-cfg-status" style="color:#8b949e;font-size:13px"></span>
         </div>
+        <div id="sink-cfg-error" style="display:none;margin-top:10px;padding:10px;background:#3b1212;border:1px solid #da3633;border-radius:6px;color:#ff8a8a;font-size:12px;font-family:Consolas,monospace;white-space:pre-wrap"></div>
     </div>
 
     <div class="stats-row">
@@ -204,7 +204,7 @@
             const p = d.producer || {};
             const c = d.consumer || {};
             const cfg = d.config || {};
-            const isSinkOnly = d.app_mode === 'sink-cli';
+            const isSinkOnly = d.app_mode === 'stream-cli';
 
             // Hide producer/consumer cards entirely in sink-cli mode; show config card.
             document.querySelectorAll('.card').forEach(card => {
@@ -301,8 +301,16 @@
             // Sink config form: enable/disable Start/Stop; pre-fill from launch_config.
             if (isSinkOnly) {
                 const running = !!sk.running;
-                document.getElementById('sink-start').disabled = running;
-                document.getElementById('sink-stop').disabled = !running;
+                const btn = document.getElementById('sink-toggle');
+                if (running) {
+                    btn.dataset.state = 'running';
+                    btn.textContent = '■ Stop';
+                    btn.style.background = '#da3633';
+                } else {
+                    btn.dataset.state = 'idle';
+                    btn.textContent = '▶ Start';
+                    btn.style.background = '#238636';
+                }
                 const lc = sk.launch_config;
                 if (lc && !window._sinkFormSeeded) {
                     document.getElementById('cfg-source').value = lc.source_uri || '';
@@ -312,11 +320,22 @@
                     document.getElementById('cfg-batch').value = lc.max_versions_per_batch || 10;
                     document.getElementById('cfg-poll').value = lc.poll_interval_secs || 5;
                     document.getElementById('cfg-auth').value = lc.azure_auth || 'auto';
-                    document.getElementById('cfg-ckpt').value = lc.checkpoint_file || './riffle-sink-ckpt.json';
+                    document.getElementById('cfg-ckpt').value = lc.checkpoint_file || './riffle-stream-ckpt.json';
                     if (lc.start_version != null) document.getElementById('cfg-startv').value = lc.start_version;
                     if (lc.end_version != null) document.getElementById('cfg-endv').value = lc.end_version;
                     document.getElementById('cfg-once').checked = !!lc.once;
                     window._sinkFormSeeded = true;
+                }
+                // Show last error (sticky until next start)
+                const errEl = document.getElementById('sink-cfg-error');
+                if (errEl) {
+                    if (sk.last_error) {
+                        errEl.textContent = '⚠ ' + sk.last_error;
+                        errEl.style.display = '';
+                    } else {
+                        errEl.textContent = '';
+                        errEl.style.display = 'none';
+                    }
                 }
             }
         }
@@ -366,7 +385,7 @@
                 max_versions_per_batch: parseInt(document.getElementById('cfg-batch').value, 10) || 10,
                 poll_interval_secs: parseInt(document.getElementById('cfg-poll').value, 10) || 5,
                 azure_auth: document.getElementById('cfg-auth').value,
-                checkpoint_file: document.getElementById('cfg-ckpt').value.trim() || './riffle-sink-ckpt.json',
+                checkpoint_file: document.getElementById('cfg-ckpt').value.trim() || './riffle-stream-ckpt.json',
                 start_version: sv === '' ? null : parseInt(sv, 10),
                 end_version: ev === '' ? null : parseInt(ev, 10),
                 once: document.getElementById('cfg-once').checked,
@@ -396,8 +415,14 @@
             } catch (e) { status.textContent = '❌ ' + e.message; }
         }
 
-        document.getElementById('sink-start').addEventListener('click', startSink);
-        document.getElementById('sink-stop').addEventListener('click', stopSink);
+        document.getElementById('sink-toggle').addEventListener('click', () => {
+            const btn = document.getElementById('sink-toggle');
+            if (btn.dataset.state === 'running') {
+                stopSink();
+            } else {
+                startSink();
+            }
+        });
     </script>
 </body>
 </html>

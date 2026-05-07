@@ -149,24 +149,48 @@ pub async fn read_added_rows(
 ) -> Result<(Vec<RecordBatch>, ArrowSchemaRef, u64)> {
     let object_store = source.log_store().object_store();
     let mut all_paths: Vec<String> = Vec::new();
+    let t_paths = Instant::now();
     for v in versions {
         let mut p = read_added_paths(source, *v).await?;
+        tracing::debug!("[sink] v{} contributes {} added file(s)", v, p.len());
         all_paths.append(&mut p);
     }
+    tracing::info!(
+        "[sink] discovered {} added file(s) across {} version(s) in {}ms",
+        all_paths.len(),
+        versions.len(),
+        t_paths.elapsed().as_millis()
+    );
 
     let mut all_batches: Vec<RecordBatch> = Vec::new();
     let mut schema: Option<ArrowSchemaRef> = None;
     let mut total_rows: u64 = 0;
-    for p in &all_paths {
+    for (idx, p) in all_paths.iter().enumerate() {
+        let t_file = Instant::now();
         let batches = read_parquet_file(object_store.clone(), p).await?;
+        let mut file_rows: u64 = 0;
         for b in batches {
             if schema.is_none() {
                 schema = Some(b.schema());
             }
-            total_rows += b.num_rows() as u64;
+            file_rows += b.num_rows() as u64;
             all_batches.push(b);
         }
+        total_rows += file_rows;
+        tracing::debug!(
+            "[sink] read file {}/{} ({}) -> {} rows in {}ms",
+            idx + 1,
+            all_paths.len(),
+            p,
+            file_rows,
+            t_file.elapsed().as_millis()
+        );
     }
+    tracing::info!(
+        "[sink] read total {} row(s) from {} file(s)",
+        total_rows,
+        all_paths.len()
+    );
 
     let schema = schema.ok_or_else(|| anyhow!("no rows added in versions {:?}", versions))?;
     Ok((all_batches, schema, total_rows))
@@ -229,23 +253,49 @@ pub async fn apply(
     versions: &[i64],
 ) -> Result<SinkOutcome> {
     let t0 = Instant::now();
+    tracing::debug!(
+        "[sink] apply start: mode={} versions={:?} target={}",
+        cfg.mode.name(),
+        versions,
+        cfg.target_uri
+    );
 
     let (batches, schema, source_rows) = read_added_rows(source, versions).await?;
     if batches.is_empty() {
+        tracing::info!("[sink] no batches to apply (empty source contributions)");
         return Ok(SinkOutcome {
             duration_ms: t0.elapsed().as_millis() as u64,
             ..Default::default()
         });
     }
+    tracing::debug!(
+        "[sink] read complete: {} batches, {} rows; opening target {}",
+        batches.len(),
+        source_rows,
+        cfg.target_uri
+    );
 
+    let t_open = Instant::now();
     let target =
         open_or_create_target(&cfg.target_uri, &cfg.target_storage_options, &schema).await?;
+    tracing::debug!(
+        "[sink] target opened (v{}) in {}ms",
+        target.version(),
+        t_open.elapsed().as_millis()
+    );
 
+    let t_write = Instant::now();
     let outcome = match &cfg.mode {
         SinkMode::Append => apply_append(target, batches, source_rows).await?,
         SinkMode::Overwrite => apply_overwrite(target, batches, source_rows).await?,
         SinkMode::Merge(spec) => apply_merge(target, batches, &schema, source_rows, spec).await?,
     };
+    tracing::debug!(
+        "[sink] {} write complete in {}ms (target_version=v{})",
+        cfg.mode.name(),
+        t_write.elapsed().as_millis(),
+        outcome.target_version
+    );
 
     Ok(SinkOutcome {
         duration_ms: t0.elapsed().as_millis() as u64,
@@ -322,10 +372,15 @@ async fn apply_merge(
         .join(" AND ");
 
     let mut merge_op = DeltaOps(target)
-        .merge(df, predicate_str)
+        .merge(df, predicate_str.clone())
         .with_source_alias("source")
         .with_target_alias("target")
         .with_safe_cast(true);
+    tracing::debug!(
+        "[sink] merge predicate: {} | update_cols=[{}]",
+        predicate_str,
+        update_cols.join(", ")
+    );
 
     // WHEN MATCHED DELETE — added before update so it takes precedence per delta-rs ordering.
     if let Some(del_pred) = &spec.when_matched_delete_predicate {

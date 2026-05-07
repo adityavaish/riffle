@@ -34,23 +34,23 @@ It works against any storage backend [delta-rs](https://github.com/delta-io/delt
 Riffle ships as a single binary with two subcommands:
 
 ```bash
-riffle sink   # Delta-to-Delta transfer (append/overwrite/merge) with live dashboard
-riffle demo   # Synthetic CDC producer + adaptive consumer demo with live dashboard
+riffle stream   # Streaming Delta-to-Delta transformation (append/overwrite/merge) with live dashboard
+riffle demo     # Synthetic CDC producer + adaptive consumer demo with live dashboard
 ```
 
-`riffle sink` can be invoked with no source/target — the dashboard opens at
+`riffle stream` can be invoked with no source/target — the dashboard opens at
 <http://127.0.0.1:3001> with a configuration form so you can start jobs from the UI.
 With `--source-uri` and `--target-uri`, the job auto-starts.
 
 ```bash
 # Auto-start a streaming MERGE
-riffle sink \
+riffle stream \
   --source-uri abfss://c@account.dfs.core.windows.net/source.delta \
   --target-uri abfss://c@account.dfs.core.windows.net/target.delta \
   --sink-mode merge --merge-keys id
 
 # Or start the dashboard only and configure from the UI
-riffle sink
+riffle stream
 ```
 
 ---
