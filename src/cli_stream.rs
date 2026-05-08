@@ -229,34 +229,37 @@ impl Controller {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    fn stop(&mut self) -> Result<(), String> {
         if !self.is_running() {
             return Err("no sink job is currently running".into());
         }
         if let Some(c) = &self.cancel {
             c.store(true, Ordering::Relaxed);
         }
-        if let Some(h) = self.handle.take() {
-            tracing::info!("[stream] stop requested; waiting up to 30s for cooperative cancel");
-            let abort_handle = h.abort_handle();
-            match tokio::time::timeout(Duration::from_secs(30), h).await {
-                Ok(_) => {
+        // Mark as stopping immediately so the UI can react.
+        let state = self.state.clone();
+        let handle = self.handle.take();
+        self.cancel = None;
+        tokio::spawn(async move {
+            {
+                let mut s = state.lock().await;
+                s.sink.status = "Stopping...".to_string();
+            }
+            if let Some(h) = handle {
+                tracing::info!("[stream] stop requested; waiting up to 10s for cooperative cancel");
+                let abort_handle = h.abort_handle();
+                if tokio::time::timeout(Duration::from_secs(10), h).await.is_err() {
+                    tracing::warn!("[stream] sink loop did not exit within 10s (likely mid-merge); aborting hard");
+                    abort_handle.abort();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                } else {
                     tracing::info!("[stream] sink loop exited cleanly");
                 }
-                Err(_) => {
-                    tracing::warn!(
-                        "[stream] sink loop did not exit within 30s (likely mid-merge); aborting hard"
-                    );
-                    abort_handle.abort();
-                    // Give the runtime a beat to actually drop the task before we return.
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
             }
-        }
-        self.cancel = None;
-        let mut s = self.state.lock().await;
-        s.sink.status = "Stopped".to_string();
-        s.sink.running = false;
+            let mut s = state.lock().await;
+            s.sink.status = "Stopped".to_string();
+            s.sink.running = false;
+        });
         Ok(())
     }
 }
@@ -562,27 +565,33 @@ impl CreateTableController {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    fn stop(&mut self) -> Result<(), String> {
         if !self.is_running() {
             return Err("no create-table job is currently running".into());
         }
         if let Some(c) = &self.cancel {
             c.store(true, Ordering::Relaxed);
         }
-        if let Some(h) = self.handle.take() {
-            let abort_handle = h.abort_handle();
-            match tokio::time::timeout(Duration::from_secs(20), h).await {
-                Ok(_) => {}
-                Err(_) => {
-                    tracing::warn!("[create-table] not exited in 20s; aborting");
+        let state = self.state.clone();
+        let handle = self.handle.take();
+        self.cancel = None;
+        tokio::spawn(async move {
+            {
+                let mut s = state.lock().await;
+                s.create_table.status = "Stopping...".to_string();
+            }
+            if let Some(h) = handle {
+                let abort_handle = h.abort_handle();
+                if tokio::time::timeout(Duration::from_secs(10), h).await.is_err() {
+                    tracing::warn!("[create-table] not exited in 10s; aborting");
                     abort_handle.abort();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             }
-        }
-        self.cancel = None;
-        let mut s = self.state.lock().await;
-        s.create_table.status = "Stopped".to_string();
-        s.create_table.running = false;
+            let mut s = state.lock().await;
+            s.create_table.status = "Stopped".to_string();
+            s.create_table.running = false;
+        });
         Ok(())
     }
 }
@@ -638,7 +647,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                     }
                     SinkCommand::Stop(reply) => {
                         let mut c = controller_b.lock().await;
-                        let r = c.stop().await;
+                        let r = c.stop();
                         let _ = reply.send(r);
                     }
                 }
@@ -660,7 +669,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                     }
                     CreateTableCommand::Stop(reply) => {
                         let mut c = controller_b.lock().await;
-                        let r = c.stop().await;
+                        let r = c.stop();
                         let _ = reply.send(r);
                     }
                 }
@@ -764,13 +773,13 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     {
         let mut c = stream_controller.lock().await;
         if c.is_running() {
-            let _ = c.stop().await;
+            let _ = c.stop();
         }
     }
     {
         let mut c = create_controller.lock().await;
         if c.is_running() {
-            let _ = c.stop().await;
+            let _ = c.stop();
         }
     }
     Ok(())

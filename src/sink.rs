@@ -403,7 +403,7 @@ async fn apply_merge(
             .join(", ");
         let order_by = match &spec.dedupe_order_by {
             Some(c) if !c.is_empty() => format!("\"{}\" DESC", c),
-            _ => "(SELECT 1)".to_string(),
+            _ => format!("\"{}\"", spec.keys[0]),
         };
         let cols = schema
             .fields()
