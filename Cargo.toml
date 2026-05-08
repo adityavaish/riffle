@@ -10,14 +10,14 @@ keywords = ["delta-lake", "cdc", "streaming", "dashboard", "consumer"]
 categories = ["database", "command-line-utilities", "web-programming"]
 
 [dependencies]
-deltalake = { version = "0.22", features = ["datafusion", "azure", "s3", "gcs"] }
+deltalake = { version = "0.32", features = ["datafusion", "azure", "s3", "gcs"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
-arrow = { version = "53" }
-arrow-select = "53"
-parquet = { version = "53", features = ["async", "object_store"] }
-object_store = "0.11"
+arrow = { version = "58" }
+arrow-select = "58"
+parquet = { version = "58", features = ["async", "object_store"] }
+object_store = "0.13"
 rand = "0.8"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
@@ -29,6 +29,7 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 
 [[bin]]
 name = "riffle"

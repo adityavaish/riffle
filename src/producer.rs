@@ -15,6 +15,7 @@ use std::time::Instant;
 use crate::config::Config;
 use crate::sample_data::{build_schema, generate_batch, EventIdRing};
 use crate::state::{ProducerEvent, SharedState};
+use crate::util::{parse_table_uri, version_to_i64};
 
 pub async fn run(state: SharedState, cfg: Config) -> Result<()> {
     let storage_options = cfg.storage_options()?;
@@ -40,21 +41,23 @@ pub async fn run(state: SharedState, cfg: Config) -> Result<()> {
         let write_start = Instant::now();
         let version = if batch_idx == 0 {
             // First write: create the table if it doesn't exist by overwriting.
-            let ops = DeltaOps::try_from_uri_with_storage_options(
-                &cfg.table_uri,
+            let table_url = parse_table_uri(&cfg.table_uri)?;
+            let ops = DeltaOps::try_from_url_with_storage_options(
+                table_url,
                 storage_options.clone(),
             )
             .await?;
             let result = ops.write(vec![batch]).with_save_mode(SaveMode::Overwrite).await?;
-            result.version()
+            version_to_i64(result.version())
         } else {
+            let table_url = parse_table_uri(&cfg.table_uri)?;
             let table =
-                open_table_with_storage_options(&cfg.table_uri, storage_options.clone()).await?;
+                open_table_with_storage_options(table_url, storage_options.clone()).await?;
             let result = DeltaOps(table)
                 .write(vec![batch])
                 .with_save_mode(SaveMode::Append)
                 .await?;
-            result.version()
+            version_to_i64(result.version())
         };
 
         let write_dur = write_start.elapsed().as_millis() as u64;

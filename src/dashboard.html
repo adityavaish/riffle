@@ -1,428 +1,823 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Riffle — Delta Lake CDC Dashboard</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
-        h1 { color: #58a6ff; margin-bottom: 6px; font-size: 24px; }
-        .sub { color: #8b949e; font-size: 12px; margin-bottom: 18px; font-family: 'Cascadia Code', monospace; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; }
-        .card h2 { color: #8b949e; font-size: 14px; text-transform: uppercase; margin-bottom: 12px; }
-        .metric { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #21262d; }
-        .metric:last-child { border-bottom: none; }
-        .metric-label { color: #8b949e; font-size: 13px; }
-        .metric-value { color: #f0f6fc; font-size: 18px; font-weight: 600; }
-        .status { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
-        .status-writing { background: #1f6feb33; color: #58a6ff; }
-        .status-complete { background: #23863633; color: #3fb950; }
-        .status-polling { background: #9e6a0333; color: #d29922; }
-        .status-processing { background: #8957e533; color: #a371f7; }
-        .progress-bar { width: 100%; height: 8px; background: #21262d; border-radius: 4px; margin-top: 8px; overflow: hidden; }
-        .progress-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
-        .progress-fill.producer { background: linear-gradient(90deg, #1f6feb, #58a6ff); }
-        .progress-fill.consumer { background: linear-gradient(90deg, #8957e5, #a371f7); }
-        .events { max-height: 300px; overflow-y: auto; font-family: 'Cascadia Code', monospace; font-size: 12px; }
-        .event-row { padding: 4px 8px; border-bottom: 1px solid #21262d; display: flex; gap: 12px; }
-        .event-row:nth-child(even) { background: #0d111755; }
-        .event-time { color: #8b949e; min-width: 70px; }
-        .event-detail { color: #c9d1d9; }
-        .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
-        .stat-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; text-align: center; }
-        .stat-value { font-size: 28px; font-weight: 700; color: #f0f6fc; }
-        .stat-label { font-size: 11px; color: #8b949e; margin-top: 4px; text-transform: uppercase; }
-    </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Riffle — Delta CDC dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        fontFamily: {
+          mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+          sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  body { font-family: Inter, system-ui, sans-serif; }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.4); border-radius: 3px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .log-line { white-space: pre-wrap; word-break: break-word; }
+  /* fade-in for tabs */
+  .tab-panel[hidden] { display: none; }
+  .toast { animation: slidein 0.2s ease-out; }
+  @keyframes slidein { from { transform: translateY(-10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+</style>
 </head>
-<body>
-    <h1>⚡ Riffle — Delta Lake CDC Dashboard</h1>
-    <div class="sub"><span id="hdr-backend">—</span> · <span id="hdr-uri">—</span></div>
+<body class="min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100 transition-colors">
 
-    <div class="card" id="sink-config-card" style="margin-bottom:20px; display:none">
-        <h2>🛠️ Stream Configuration</h2>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Source URI</label>
-                <input id="cfg-source" type="text" placeholder="abfss://... or ./local.delta"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Target URI</label>
-                <input id="cfg-target" type="text" placeholder="abfss://... or ./target.delta"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Mode</label>
-                <select id="cfg-mode" style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px">
-                    <option value="merge">merge (upsert via keys)</option>
-                    <option value="append">append</option>
-                    <option value="overwrite">overwrite</option>
-                </select>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Merge Keys (comma-sep, required for merge)</label>
-                <input id="cfg-keys" type="text" placeholder="id, BalanceId"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Max versions per batch</label>
-                <input id="cfg-batch" type="number" value="10" min="1" max="100"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Poll interval (s)</label>
-                <input id="cfg-poll" type="number" value="5" min="1" max="3600"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Azure auth</label>
-                <select id="cfg-auth" style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px">
-                    <option value="auto">auto (sp → msi → cli)</option>
-                    <option value="cli">cli (Azure CLI / VS Code)</option>
-                    <option value="msi">msi (Managed Identity)</option>
-                    <option value="sp">sp (Service Principal env)</option>
-                </select>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Checkpoint file</label>
-                <input id="cfg-ckpt" type="text" value="./riffle-stream-ckpt.json"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px;font-family:'Cascadia Code',monospace"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Start version (optional)</label>
-                <input id="cfg-startv" type="number" placeholder="resume from checkpoint"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
-            </div>
-            <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">End version (optional)</label>
-                <input id="cfg-endv" type="number" placeholder="follow indefinitely"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:13px"/>
-            </div>
-            <div style="grid-column: span 2">
-                <label style="color:#8b949e;font-size:13px"><input id="cfg-once" type="checkbox" style="vertical-align:middle"/> Process one batch and stop (--once)</label>
-            </div>
-        </div>
-        <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
-            <button id="sink-toggle" data-state="idle" style="padding:10px 20px;background:#238636;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600">▶ Start</button>
-            <span id="sink-cfg-status" style="color:#8b949e;font-size:13px"></span>
-        </div>
-        <div id="sink-cfg-error" style="display:none;margin-top:10px;padding:10px;background:#3b1212;border:1px solid #da3633;border-radius:6px;color:#ff8a8a;font-size:12px;font-family:Consolas,monospace;white-space:pre-wrap"></div>
+<!-- ============= top nav ============= -->
+<header class="sticky top-0 z-30 border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur">
+  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-4">
+    <div class="flex items-center gap-2">
+      <div class="w-8 h-8 rounded-md bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold">R</div>
+      <div>
+        <div class="font-semibold text-base leading-none">Riffle</div>
+        <div class="text-xs text-slate-500 dark:text-slate-400 leading-none mt-0.5">Delta Lake CDC toolkit</div>
+      </div>
     </div>
 
-    <div class="stats-row">
-        <div class="stat-box"><div class="stat-value" id="total-produced">0</div><div class="stat-label">Rows Produced</div></div>
-        <div class="stat-box"><div class="stat-value" id="total-consumed">0</div><div class="stat-label">Rows Consumed</div></div>
-        <div class="stat-box"><div class="stat-value" id="version-lag">0</div><div class="stat-label">Version Lag</div></div>
-        <div class="stat-box"><div class="stat-value" id="throughput">0</div><div class="stat-label">Rows/sec (Producer)</div></div>
+    <nav id="tabs" class="ml-4 flex items-center gap-1 text-sm" role="tablist">
+      <button data-tab="stream"        class="tab-btn px-3 py-1.5 rounded-md font-medium hover:bg-slate-100 dark:hover:bg-slate-800">Stream</button>
+      <button data-tab="create-table"  class="tab-btn px-3 py-1.5 rounded-md font-medium hover:bg-slate-100 dark:hover:bg-slate-800">Create Table</button>
+      <button data-tab="tables"        class="tab-btn px-3 py-1.5 rounded-md font-medium hover:bg-slate-100 dark:hover:bg-slate-800">Tables</button>
+      <button data-tab="demo"          class="tab-btn px-3 py-1.5 rounded-md font-medium hover:bg-slate-100 dark:hover:bg-slate-800">Demo</button>
+    </nav>
+
+    <div class="ml-auto flex items-center gap-3">
+      <span id="globalStatus" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+        <span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>idle
+      </span>
+      <button id="darkToggle" title="Toggle dark mode" class="p-1.5 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400">
+        <svg class="w-4 h-4 dark:hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        <svg class="w-4 h-4 hidden dark:inline" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.36-6.36l-.7.7M6.34 17.66l-.7.7m12.72 0l-.7-.7M6.34 6.34l-.7-.7M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+      </button>
     </div>
+  </div>
+</header>
 
-    <div class="grid">
-        <div class="card">
-            <h2>🚀 Producer</h2>
-            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span id="producer-status" class="status">—</span></span></div>
-            <div class="metric"><span class="metric-label">Batches Written</span><span class="metric-value" id="producer-batches">0</span></div>
-            <div class="metric"><span class="metric-label">Current Version</span><span class="metric-value" id="producer-version">—</span></div>
-            <div class="metric"><span class="metric-label">Last Write</span><span class="metric-value"><span id="producer-last-write">—</span> ms</span></div>
-            <div class="metric"><span class="metric-label">Avg Write</span><span class="metric-value"><span id="producer-avg-write">—</span> ms</span></div>
-            <div class="progress-bar"><div class="progress-fill producer" id="producer-progress" style="width:0%"></div></div>
+<!-- toast region -->
+<div id="toasts" class="fixed top-16 right-4 z-50 flex flex-col gap-2 max-w-md"></div>
+
+<main class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6">
+
+<!-- ============================== Stream tab ============================== -->
+<section id="tab-stream" class="tab-panel grid grid-cols-1 lg:grid-cols-12 gap-4">
+
+  <div class="lg:col-span-5 space-y-4">
+    <!-- form card -->
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-5 shadow-sm">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-base font-semibold">Stream configuration</h2>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Delta-to-Delta CDC: append, overwrite, or merge.</p>
+        </div>
+        <button class="copy-cli text-xs text-indigo-600 dark:text-indigo-400 hover:underline" data-tab="stream">Copy CLI</button>
+      </div>
+
+      <form id="streamForm" class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Source URI</label>
+          <input name="source_uri" required placeholder="abfss://container@acct.dfs.core.windows.net/path/source.delta"
+                 class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Target URI</label>
+          <input name="target_uri" required placeholder="abfss://.../target.delta"
+                 class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
         </div>
 
-        <div class="card">
-            <h2>📡 Consumer (Adaptive CDC Reader)</h2>
-            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span id="consumer-status" class="status">—</span></span></div>
-            <div class="metric"><span class="metric-label">Mode</span><span class="metric-value"><span id="consumer-mode">—</span></span></div>
-            <div class="metric"><span class="metric-label">Versions Processed</span><span class="metric-value" id="consumer-versions">0</span></div>
-            <div class="metric"><span class="metric-label">Work Units (chunks)</span><span class="metric-value" id="consumer-chunks">0</span></div>
-            <div class="metric"><span class="metric-label">Last Version Seen</span><span class="metric-value" id="consumer-version">—</span></div>
-            <div class="metric"><span class="metric-label">Pending Versions (lag)</span><span class="metric-value" id="consumer-pending">0</span></div>
-            <div class="metric"><span class="metric-label">Last Latency</span><span class="metric-value"><span id="consumer-latency">—</span> ms</span></div>
-            <div class="metric"><span class="metric-label">Avg Latency</span><span class="metric-value"><span id="consumer-avg-latency">—</span> ms</span></div>
-            <div class="metric"><span class="metric-label">Checkpoint</span><span class="metric-value" id="consumer-checkpoint">—</span></div>
-            <div class="metric"><span class="metric-label">Max Chunk Size</span><span class="metric-value"><span id="consumer-chunk-target">—</span> rows</span></div>
-            <div class="metric"><span class="metric-label">Merge / Split Thresholds</span><span class="metric-value"><span id="consumer-merge-th">—</span> / <span id="consumer-split-th">—</span></span></div>
-            <div class="progress-bar"><div class="progress-fill consumer" id="consumer-progress" style="width:0%"></div></div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Mode</label>
+            <select name="sink_mode" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+              <option value="append">append</option>
+              <option value="overwrite">overwrite</option>
+              <option value="merge">merge</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Azure auth</label>
+            <select name="azure_auth" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+              <option value="auto">auto</option>
+              <option value="cli">cli</option>
+              <option value="msi">msi</option>
+            </select>
+          </div>
         </div>
 
-        <div class="card" id="sink-card" style="display:none">
-            <h2>🪣 Sink (Delta → Delta)</h2>
-            <div class="metric"><span class="metric-label">Status</span><span class="metric-value"><span id="sink-status" class="status">—</span></span></div>
-            <div class="metric"><span class="metric-label">Mode</span><span class="metric-value" id="sink-mode">—</span></div>
-            <div class="metric"><span class="metric-label">Target URI</span><span class="metric-value" id="sink-target" style="font-size:11px;word-break:break-all;text-align:right;max-width:60%">—</span></div>
-            <div class="metric"><span class="metric-label">Target Version</span><span class="metric-value" id="sink-version">—</span></div>
-            <div class="metric"><span class="metric-label">Batches Processed</span><span class="metric-value" id="sink-batches">0</span></div>
-            <div class="metric"><span class="metric-label">Total Inserts</span><span class="metric-value" id="sink-inserts">0</span></div>
-            <div class="metric"><span class="metric-label">Total Updates</span><span class="metric-value" id="sink-updates">0</span></div>
-            <div class="metric"><span class="metric-label">Total Deletes</span><span class="metric-value" id="sink-deletes">0</span></div>
-            <div class="metric"><span class="metric-label">Total Appended</span><span class="metric-value" id="sink-appended">0</span></div>
-            <div class="metric"><span class="metric-label">Last Source Rows</span><span class="metric-value" id="sink-last-rows">0</span></div>
-            <div class="metric"><span class="metric-label">Last Duration</span><span class="metric-value"><span id="sink-last-ms">—</span> ms</span></div>
-            <div class="metric"><span class="metric-label">Avg Duration</span><span class="metric-value"><span id="sink-avg-ms">—</span> ms</span></div>
-        </div>
-    </div>
-
-    <div class="card" style="margin-bottom:20px">
-        <h2>⚙️ Consumer Tuning (live)</h2>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:end">
+        <details id="streamMergeDetails" class="rounded-md bg-slate-50 dark:bg-slate-800/50 p-3 text-sm">
+          <summary class="cursor-pointer font-medium text-slate-700 dark:text-slate-300">Merge options</summary>
+          <div class="space-y-2 mt-3">
             <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Max chunk size (rows per work unit)</label>
-                <input id="cfg-chunk" type="number" min="1000" max="10000000" step="1000"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:14px"/>
-                <small style="color:#6e7681">Versions split into chunks of this size when exceeding split threshold.</small>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Merge keys (comma-separated)</label>
+              <input name="merge_keys" placeholder="id" class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
             </div>
             <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Merge threshold (rows)</label>
-                <input id="cfg-merge" type="number" min="1000" max="10000000" step="1000"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:14px"/>
-                <small style="color:#6e7681">Combine consecutive small versions if total stays below this.</small>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Update columns</label>
+              <input name="merge_update_columns" placeholder="* or col1,col2" class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
+            <div class="grid grid-cols-1 gap-2">
+              <input name="merge_update_predicate" placeholder="optional update predicate" class="text-xs font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+              <input name="merge_delete_predicate" placeholder="optional delete predicate" class="text-xs font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+              <input name="merge_insert_predicate" placeholder="optional insert predicate" class="text-xs font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
             </div>
             <div>
-                <label style="display:block;color:#8b949e;font-size:13px;margin-bottom:4px">Split threshold (rows)</label>
-                <input id="cfg-split" type="number" min="1000" max="10000000" step="1000"
-                    style="width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;font-size:14px"/>
-                <small style="color:#6e7681">Versions above this are split into chunks.</small>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Dedupe order column (latest wins per key)</label>
+              <input name="merge_dedupe_order_by" placeholder="e.g. event_timestamp" class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
             </div>
+          </div>
+        </details>
+
+        <details class="rounded-md bg-slate-50 dark:bg-slate-800/50 p-3 text-sm">
+          <summary class="cursor-pointer font-medium text-slate-700 dark:text-slate-300">Advanced</summary>
+          <div class="grid grid-cols-2 gap-3 mt-3">
+            <div><label class="text-xs text-slate-600 dark:text-slate-400">Start version</label><input name="start_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div><label class="text-xs text-slate-600 dark:text-slate-400">End version</label><input name="end_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div><label class="text-xs text-slate-600 dark:text-slate-400">Poll interval (s)</label><input name="poll_interval_secs" type="number" value="5" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div><label class="text-xs text-slate-600 dark:text-slate-400">Max versions/batch</label><input name="max_versions_per_batch" type="number" value="10" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div><label class="text-xs text-slate-600 dark:text-slate-400">Read concurrency</label><input name="read_concurrency" type="number" value="8" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div><label class="text-xs text-slate-600 dark:text-slate-400">Checkpoint file</label><input name="checkpoint_file" value="./riffle-stream-ckpt.json" class="mt-1 w-full text-sm font-mono px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <label class="col-span-2 inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300"><input type="checkbox" name="once" /> Run once (don't poll for new versions)</label>
+          </div>
+        </details>
+
+        <div class="pt-2">
+          <button type="submit" id="streamRunBtn" class="w-full font-medium px-4 py-2.5 rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 transition">
+            Start streaming
+          </button>
         </div>
-        <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
-            <button id="cfg-apply" style="padding:8px 16px;background:#238636;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600">Apply</button>
-            <button id="cfg-reset" style="padding:8px 16px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;cursor:pointer">Reset to defaults</button>
-            <span id="cfg-status" style="color:#8b949e;font-size:13px"></span>
-        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="lg:col-span-7 space-y-4">
+    <!-- KPIs -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+        <div class="text-xs text-slate-500 dark:text-slate-400">Status</div>
+        <div id="streamKpiStatus" class="font-semibold text-sm mt-1">—</div>
+      </div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+        <div class="text-xs text-slate-500 dark:text-slate-400">Batches processed</div>
+        <div id="streamKpiBatches" class="font-semibold text-lg mt-1">0</div>
+      </div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+        <div class="text-xs text-slate-500 dark:text-slate-400">Target version</div>
+        <div id="streamKpiVersion" class="font-semibold text-lg mt-1">—</div>
+      </div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+        <div class="text-xs text-slate-500 dark:text-slate-400">Avg apply (ms)</div>
+        <div id="streamKpiLatency" class="font-semibold text-lg mt-1">0</div>
+      </div>
     </div>
 
-    <div class="grid">
-        <div class="card"><h2>Producer Events</h2><div class="events" id="producer-events"></div></div>
-        <div class="card"><h2>Consumer Events</h2><div class="events" id="consumer-events"></div></div>
-        <div class="card" id="sink-events-card" style="display:none"><h2>Sink Events</h2><div class="events" id="sink-events"></div></div>
+    <!-- I/U/D counts -->
+    <div class="grid grid-cols-4 gap-3">
+      <div class="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg p-3">
+        <div class="text-xs text-emerald-700 dark:text-emerald-300">Inserts</div>
+        <div id="streamKpiInserts" class="font-semibold text-lg mt-1 text-emerald-700 dark:text-emerald-300">0</div>
+      </div>
+      <div class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+        <div class="text-xs text-amber-700 dark:text-amber-300">Updates</div>
+        <div id="streamKpiUpdates" class="font-semibold text-lg mt-1 text-amber-700 dark:text-amber-300">0</div>
+      </div>
+      <div class="bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-lg p-3">
+        <div class="text-xs text-rose-700 dark:text-rose-300">Deletes</div>
+        <div id="streamKpiDeletes" class="font-semibold text-lg mt-1 text-rose-700 dark:text-rose-300">0</div>
+      </div>
+      <div class="bg-sky-50 dark:bg-sky-900/20 border border-sky-200 dark:border-sky-800 rounded-lg p-3">
+        <div class="text-xs text-sky-700 dark:text-sky-300">Appended</div>
+        <div id="streamKpiAppended" class="font-semibold text-lg mt-1 text-sky-700 dark:text-sky-300">0</div>
+      </div>
     </div>
 
-    <script>
-        const es = new EventSource('/events');
-        es.onmessage = (e) => { try { updateDashboard(JSON.parse(e.data)); } catch(_){} };
+    <!-- recent events table -->
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+      <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+        <h3 class="text-sm font-semibold">Recent applies</h3>
+        <span class="text-xs text-slate-500 dark:text-slate-400">last 10</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50">
+            <tr><th class="px-3 py-2 text-left">time</th><th class="px-3 py-2 text-left">mode</th><th class="px-3 py-2 text-right">src rows</th><th class="px-3 py-2 text-right">I</th><th class="px-3 py-2 text-right">U</th><th class="px-3 py-2 text-right">D</th><th class="px-3 py-2 text-right">A</th><th class="px-3 py-2 text-right">v</th><th class="px-3 py-2 text-right">ms</th></tr>
+          </thead>
+          <tbody id="streamEventsBody"><tr><td colspan="9" class="text-center text-slate-400 py-4">No events yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
 
-        function updateDashboard(d) {
-            const p = d.producer || {};
-            const c = d.consumer || {};
-            const cfg = d.config || {};
-            const isSinkOnly = d.app_mode === 'stream-cli';
+<!-- ============================== Create Table tab ============================== -->
+<section id="tab-create-table" class="tab-panel grid grid-cols-1 lg:grid-cols-12 gap-4" hidden>
 
-            // Hide producer/consumer cards entirely in sink-cli mode; show config card.
-            document.querySelectorAll('.card').forEach(card => {
-                const h2 = card.querySelector('h2');
-                if (!h2) return;
-                const t = h2.textContent;
-                if (isSinkOnly && (t.includes('Producer') || t.includes('Consumer') || t.includes('Tuning'))) {
-                    card.style.display = 'none';
-                }
-            });
-            if (isSinkOnly) {
-                document.querySelectorAll('.stat-box').forEach(b => b.style.display = 'none');
-                document.getElementById('sink-config-card').style.display = '';
-            }
+  <div class="lg:col-span-5 space-y-4">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-5 shadow-sm">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-base font-semibold">Create a Delta table</h2>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Synthetic wide-schema data, optionally Z-ORDERed.</p>
+        </div>
+        <button class="copy-cli text-xs text-indigo-600 dark:text-indigo-400 hover:underline" data-tab="create-table">Copy CLI</button>
+      </div>
 
-            document.getElementById('hdr-backend').textContent = d.backend || '—';
-            document.getElementById('hdr-uri').textContent = d.table_uri || '—';
+      <form id="createForm" class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Target URI</label>
+          <input name="uri" required placeholder="abfss://container@acct.dfs.core.windows.net/path/new.delta"
+                 class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        </div>
 
-            document.getElementById('total-produced').textContent = (p.total_rows_written||0).toLocaleString();
-            document.getElementById('total-consumed').textContent = (c.total_rows_consumed||0).toLocaleString();
-            document.getElementById('throughput').textContent = Math.round(p.rows_per_sec||0).toLocaleString();
-            const lag = (p.current_version||0) - (c.last_version_seen||0);
-            document.getElementById('version-lag').textContent = lag >= 0 ? lag : 0;
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Rows</label>
+            <input name="rows" type="number" value="200000" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+          </div>
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Commits</label>
+            <input name="commits" type="number" value="1" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+          </div>
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Columns</label>
+            <input name="columns" type="number" value="30" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+          </div>
+        </div>
 
-            const pStatus = document.getElementById('producer-status');
-            pStatus.textContent = p.status || '—';
-            pStatus.className = 'status status-' + (p.status||'').toLowerCase();
-            document.getElementById('producer-batches').textContent = p.batches_written || 0;
-            document.getElementById('producer-version').textContent = p.current_version || '—';
-            document.getElementById('producer-last-write').textContent = p.last_write_duration_ms || '—';
-            document.getElementById('producer-avg-write').textContent = p.avg_write_duration_ms || '—';
-            document.getElementById('producer-progress').style.width = Math.min(100, ((p.batches_written||0) % 50) * 2) + '%';
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Z-ORDER by (blank = none)</label>
+            <input name="zorder_by" value="event_timestamp" class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+          </div>
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Azure auth</label>
+            <select name="azure_auth" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+              <option value="auto">auto</option>
+              <option value="cli">cli</option>
+              <option value="msi">msi</option>
+            </select>
+          </div>
+        </div>
 
-            const cStatus = document.getElementById('consumer-status');
-            cStatus.textContent = c.status || '—';
-            cStatus.className = 'status status-' + (c.status||'').toLowerCase().replace(/\.+/, '');
-            document.getElementById('consumer-mode').textContent = c.mode || '—';
-            document.getElementById('consumer-versions').textContent = c.versions_processed || 0;
-            document.getElementById('consumer-chunks').textContent = c.chunks_processed || 0;
-            document.getElementById('consumer-version').textContent = c.last_version_seen || '—';
-            document.getElementById('consumer-pending').textContent = c.pending_versions || 0;
-            document.getElementById('consumer-latency').textContent = c.last_poll_duration_ms || '—';
-            document.getElementById('consumer-avg-latency').textContent = c.avg_latency_ms || '—';
-            document.getElementById('consumer-checkpoint').textContent = c.checkpoint || '—';
-            document.getElementById('consumer-chunk-target').textContent = (cfg.chunk_target_rows || 0).toLocaleString();
-            document.getElementById('consumer-merge-th').textContent = (cfg.merge_threshold_rows || 0).toLocaleString();
-            document.getElementById('consumer-split-th').textContent = (cfg.split_threshold_rows || 0).toLocaleString();
+        <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+          <input type="checkbox" name="overwrite" /> Overwrite if table exists
+        </label>
 
-            ['cfg-chunk','cfg-merge','cfg-split'].forEach((id, idx) => {
-                const el = document.getElementById(id);
-                if (el && document.activeElement !== el && !el.dataset.touched) {
-                    const keys = ['chunk_target_rows','merge_threshold_rows','split_threshold_rows'];
-                    el.value = cfg[keys[idx]] || '';
-                }
-            });
+        <div class="pt-2">
+          <button type="submit" id="createRunBtn" class="w-full font-medium px-4 py-2.5 rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 transition">
+            Create table
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 
-            const lagPct = ((p.current_version||0) > 0) ? Math.max(0, ((c.last_version_seen||0) / p.current_version) * 100) : 0;
-            document.getElementById('consumer-progress').style.width = Math.min(lagPct, 100) + '%';
+  <div class="lg:col-span-7 space-y-4">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-5 space-y-4">
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-sm font-semibold">Status</div>
+          <div id="createStatus" class="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">idle</div>
+        </div>
+        <div class="text-xs text-slate-500 dark:text-slate-400 font-mono break-all" id="createTargetUri">—</div>
+      </div>
 
-            document.getElementById('producer-events').innerHTML = (p.events||[]).slice(-20).reverse().map(ev =>
-                `<div class="event-row"><span class="event-time">${ev.timestamp}</span><span class="event-detail">Batch ${ev.batch_id} → v${ev.version} | ${ev.rows.toLocaleString()} rows | ${ev.duration_ms}ms</span></div>`
-            ).join('');
-            document.getElementById('consumer-events').innerHTML = (c.events||[]).slice(-20).reverse().map(ev => {
-                const badge = ev.mode === 'merged' ? '🔗' : ev.mode === 'split' ? '✂️' : '▪️';
-                return `<div class="event-row"><span class="event-time">${ev.timestamp}</span><span class="event-detail">${badge} ${ev.mode} | ${ev.range} | +${ev.new_rows.toLocaleString()} rows | ${ev.latency_ms}ms</span></div>`;
-            }).join('');
+      <div>
+        <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400 mb-1">
+          <span>Commits</span>
+          <span id="createCommitsLabel">0 / 0</span>
+        </div>
+        <div class="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+          <div id="createCommitsBar" class="h-2 bg-indigo-500 transition-all" style="width:0%"></div>
+        </div>
+      </div>
 
-            const sk = d.sink || {};
-            const sinkCard = document.getElementById('sink-card');
-            const sinkEventsCard = document.getElementById('sink-events-card');
-            if (sk.enabled) {
-                sinkCard.style.display = '';
-                sinkEventsCard.style.display = '';
-                const skStatus = document.getElementById('sink-status');
-                skStatus.textContent = sk.status || '—';
-                skStatus.className = 'status status-' + (sk.status||'').toLowerCase().replace(/[^a-z]/g,'');
-                document.getElementById('sink-mode').textContent = sk.mode || '—';
-                document.getElementById('sink-target').textContent = sk.target_uri || '—';
-                document.getElementById('sink-version').textContent = sk.target_version || '—';
-                document.getElementById('sink-batches').textContent = (sk.batches_processed||0).toLocaleString();
-                document.getElementById('sink-inserts').textContent = (sk.total_inserts||0).toLocaleString();
-                document.getElementById('sink-updates').textContent = (sk.total_updates||0).toLocaleString();
-                document.getElementById('sink-deletes').textContent = (sk.total_deletes||0).toLocaleString();
-                document.getElementById('sink-appended').textContent = (sk.total_appended||0).toLocaleString();
-                document.getElementById('sink-last-rows').textContent = (sk.last_source_rows||0).toLocaleString();
-                document.getElementById('sink-last-ms').textContent = sk.last_duration_ms || '—';
-                document.getElementById('sink-avg-ms').textContent = sk.avg_duration_ms || '—';
-                document.getElementById('sink-events').innerHTML = (sk.events||[]).slice(-20).reverse().map(ev => {
-                    const badge = ev.mode === 'merge' ? '🔀' : ev.mode === 'overwrite' ? '♻️' : '➕';
-                    return `<div class="event-row"><span class="event-time">${ev.timestamp}</span><span class="event-detail">${badge} ${ev.mode} | src=${(ev.source_rows||0).toLocaleString()} | ins=${(ev.inserts||0).toLocaleString()} upd=${(ev.updates||0).toLocaleString()} del=${(ev.deletes||0).toLocaleString()} app=${(ev.appended||0).toLocaleString()} | tgt v${ev.target_version} | ${ev.duration_ms}ms</span></div>`;
-                }).join('');
-            }
+      <div>
+        <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400 mb-1">
+          <span>Rows written</span>
+          <span id="createRowsLabel">0 / 0</span>
+        </div>
+        <div class="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+          <div id="createRowsBar" class="h-2 bg-emerald-500 transition-all" style="width:0%"></div>
+        </div>
+      </div>
 
-            // Sink config form: enable/disable Start/Stop; pre-fill from launch_config.
-            if (isSinkOnly) {
-                const running = !!sk.running;
-                const btn = document.getElementById('sink-toggle');
-                if (running) {
-                    btn.dataset.state = 'running';
-                    btn.textContent = '■ Stop';
-                    btn.style.background = '#da3633';
-                } else {
-                    btn.dataset.state = 'idle';
-                    btn.textContent = '▶ Start';
-                    btn.style.background = '#238636';
-                }
-                const lc = sk.launch_config;
-                if (lc && !window._sinkFormSeeded) {
-                    document.getElementById('cfg-source').value = lc.source_uri || '';
-                    document.getElementById('cfg-target').value = lc.target_uri || '';
-                    document.getElementById('cfg-mode').value = lc.sink_mode || 'merge';
-                    document.getElementById('cfg-keys').value = lc.merge_keys || '';
-                    document.getElementById('cfg-batch').value = lc.max_versions_per_batch || 10;
-                    document.getElementById('cfg-poll').value = lc.poll_interval_secs || 5;
-                    document.getElementById('cfg-auth').value = lc.azure_auth || 'auto';
-                    document.getElementById('cfg-ckpt').value = lc.checkpoint_file || './riffle-stream-ckpt.json';
-                    if (lc.start_version != null) document.getElementById('cfg-startv').value = lc.start_version;
-                    if (lc.end_version != null) document.getElementById('cfg-endv').value = lc.end_version;
-                    document.getElementById('cfg-once').checked = !!lc.once;
-                    window._sinkFormSeeded = true;
-                }
-                // Show last error (sticky until next start)
-                const errEl = document.getElementById('sink-cfg-error');
-                if (errEl) {
-                    if (sk.last_error) {
-                        errEl.textContent = '⚠ ' + sk.last_error;
-                        errEl.style.display = '';
-                    } else {
-                        errEl.textContent = '';
-                        errEl.style.display = 'none';
-                    }
-                }
-            }
-        }
+      <div class="grid grid-cols-2 gap-3 text-sm">
+        <div class="bg-slate-50 dark:bg-slate-800/40 rounded-md p-3">
+          <div class="text-xs text-slate-500 dark:text-slate-400">Last commit (ms)</div>
+          <div id="createLastMs" class="font-semibold mt-1">—</div>
+        </div>
+        <div class="bg-slate-50 dark:bg-slate-800/40 rounded-md p-3">
+          <div class="text-xs text-slate-500 dark:text-slate-400">Optimize</div>
+          <div id="createOptimize" class="font-semibold mt-1 text-xs">—</div>
+        </div>
+      </div>
 
-        ['cfg-chunk','cfg-merge','cfg-split'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.addEventListener('input', () => { el.dataset.touched = '1'; });
-        });
+      <div id="createError" class="hidden text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded p-2 font-mono"></div>
+    </div>
+  </div>
+</section>
 
-        async function applyConfig() {
-            const body = {
-                chunk_target_rows: parseInt(document.getElementById('cfg-chunk').value, 10) || null,
-                merge_threshold_rows: parseInt(document.getElementById('cfg-merge').value, 10) || null,
-                split_threshold_rows: parseInt(document.getElementById('cfg-split').value, 10) || null,
-            };
-            const status = document.getElementById('cfg-status');
-            status.textContent = 'Applying...';
-            try {
-                const res = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-                if (!res.ok) throw new Error(await res.text());
-                const newCfg = await res.json();
-                status.textContent = `✅ Applied: chunk=${newCfg.chunk_target_rows.toLocaleString()}, merge=${newCfg.merge_threshold_rows.toLocaleString()}, split=${newCfg.split_threshold_rows.toLocaleString()} (effective on next poll)`;
-                ['cfg-chunk','cfg-merge','cfg-split'].forEach(id => { document.getElementById(id).dataset.touched = ''; });
-                setTimeout(() => { status.textContent = ''; }, 6000);
-            } catch (e) { status.textContent = '❌ ' + e.message; }
-        }
+<!-- ============================== Tables tab ============================== -->
+<section id="tab-tables" class="tab-panel grid grid-cols-1 lg:grid-cols-12 gap-4" hidden>
 
-        document.getElementById('cfg-apply').addEventListener('click', applyConfig);
-        document.getElementById('cfg-reset').addEventListener('click', () => {
-            document.getElementById('cfg-chunk').value = 50000;
-            document.getElementById('cfg-merge').value = 30000;
-            document.getElementById('cfg-split').value = 100000;
-            ['cfg-chunk','cfg-merge','cfg-split'].forEach(id => { document.getElementById(id).dataset.touched = '1'; });
-            applyConfig();
-        });
+  <div class="lg:col-span-5 space-y-4">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold mb-3">Inspect Delta table</h2>
+      <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Read-only: schema, version, recent commits.</p>
+      <form id="inspectForm" class="space-y-3">
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Table URI</label>
+          <input name="uri" required placeholder="abfss://container@acct.dfs.core.windows.net/path/table.delta"
+                 class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+        </div>
+        <div>
+          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Azure auth</label>
+          <select name="azure_auth" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+            <option value="auto">auto</option>
+            <option value="cli">cli</option>
+            <option value="msi">msi</option>
+          </select>
+        </div>
+        <button type="submit" id="inspectBtn" class="w-full font-medium px-4 py-2.5 rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 transition">
+          Inspect
+        </button>
+      </form>
+    </div>
+  </div>
 
-        async function startSink() {
-            const status = document.getElementById('sink-cfg-status');
-            const sv = document.getElementById('cfg-startv').value;
-            const ev = document.getElementById('cfg-endv').value;
-            const body = {
-                source_uri: document.getElementById('cfg-source').value.trim(),
-                target_uri: document.getElementById('cfg-target').value.trim(),
-                sink_mode: document.getElementById('cfg-mode').value,
-                merge_keys: document.getElementById('cfg-keys').value.trim(),
-                merge_update_columns: '',
-                max_versions_per_batch: parseInt(document.getElementById('cfg-batch').value, 10) || 10,
-                poll_interval_secs: parseInt(document.getElementById('cfg-poll').value, 10) || 5,
-                azure_auth: document.getElementById('cfg-auth').value,
-                checkpoint_file: document.getElementById('cfg-ckpt').value.trim() || './riffle-stream-ckpt.json',
-                start_version: sv === '' ? null : parseInt(sv, 10),
-                end_version: ev === '' ? null : parseInt(ev, 10),
-                once: document.getElementById('cfg-once').checked,
-            };
-            if (!body.source_uri || !body.target_uri) {
-                status.textContent = '❌ Source URI and Target URI are required.';
-                return;
-            }
-            status.textContent = 'Starting...';
-            try {
-                const res = await fetch('/api/sink/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-                if (!res.ok) throw new Error(await res.text());
-                status.textContent = '✅ Job started.';
-                window._sinkFormSeeded = false; // allow re-seeding from server state
-                setTimeout(() => { status.textContent = ''; }, 4000);
-            } catch (e) { status.textContent = '❌ ' + e.message; }
-        }
+  <div class="lg:col-span-7 space-y-4">
+    <div id="inspectSummary" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Version</div><div id="insVersion" class="font-semibold text-lg mt-1">—</div></div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Files</div><div id="insFiles" class="font-semibold text-lg mt-1">—</div></div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Est. rows</div><div id="insRows" class="font-semibold text-lg mt-1">—</div></div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Partitioned by</div><div id="insParts" class="font-semibold text-sm mt-1 break-all">—</div></div>
+    </div>
 
-        async function stopSink() {
-            const status = document.getElementById('sink-cfg-status');
-            status.textContent = 'Stopping...';
-            try {
-                const res = await fetch('/api/sink/stop', { method:'POST' });
-                if (!res.ok) throw new Error(await res.text());
-                status.textContent = '✅ Job stopped.';
-                setTimeout(() => { status.textContent = ''; }, 4000);
-            } catch (e) { status.textContent = '❌ ' + e.message; }
-        }
+    <div id="inspectSchema" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+      <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800"><h3 class="text-sm font-semibold">Schema</h3></div>
+      <div class="overflow-x-auto max-h-96">
+        <table class="w-full text-xs">
+          <thead class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 sticky top-0">
+            <tr><th class="px-3 py-2 text-left">name</th><th class="px-3 py-2 text-left">type</th><th class="px-3 py-2 text-left">nullable</th></tr>
+          </thead>
+          <tbody id="insSchemaBody"></tbody>
+        </table>
+      </div>
+    </div>
 
-        document.getElementById('sink-toggle').addEventListener('click', () => {
-            const btn = document.getElementById('sink-toggle');
-            if (btn.dataset.state === 'running') {
-                stopSink();
-            } else {
-                startSink();
-            }
-        });
-    </script>
+    <div id="inspectCommits" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+      <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800"><h3 class="text-sm font-semibold">Recent commits</h3></div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50">
+            <tr><th class="px-3 py-2 text-left">version</th><th class="px-3 py-2 text-left">timestamp</th><th class="px-3 py-2 text-left">operation</th></tr>
+          </thead>
+          <tbody id="insCommitsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="inspectError" class="hidden text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded p-3 font-mono"></div>
+  </div>
+</section>
+
+<!-- ============================== Demo tab ============================== -->
+<section id="tab-demo" class="tab-panel" hidden>
+  <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-6">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 rounded-md bg-indigo-100 dark:bg-indigo-900/40 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+      </div>
+      <div class="flex-1">
+        <h2 class="text-base font-semibold">Demo — synthetic CDC producer + adaptive consumer</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">
+          The demo runs a producer that writes synthetic CDC commits, and an adaptive
+          consumer that processes them at a tunable batch size. It exposes its own
+          dashboard when launched. Run from the CLI:
+        </p>
+        <pre class="mt-3 text-xs font-mono bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded p-3 overflow-x-auto"><code>riffle demo \
+  --table-uri abfss://&lt;container&gt;@&lt;account&gt;.dfs.core.windows.net/path/demo.delta \
+  --producer-enabled \
+  --consumer-enabled \
+  --bind-addr 127.0.0.1:8080</code></pre>
+        <p class="text-xs text-slate-500 dark:text-slate-400 mt-3">
+          Embedding the demo in this dashboard is on the roadmap — it shares state
+          with this UI but its job lifecycle is currently CLI-driven.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= shared logs panel (always visible at bottom) ================= -->
+<div class="mt-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+  <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+    <h3 class="text-sm font-semibold flex items-center gap-2">
+      <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14-4H5m14 8H5m14 4H5"/></svg>
+      Logs
+    </h3>
+    <div class="flex items-center gap-3 text-xs">
+      <select id="logLevel" class="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+        <option value="">all</option>
+        <option value="error">error</option>
+        <option value="warn">warn</option>
+        <option value="info">info</option>
+      </select>
+      <label class="inline-flex items-center gap-1 text-slate-600 dark:text-slate-400">
+        <input id="logAutoScroll" type="checkbox" checked /> auto-scroll
+      </label>
+      <button id="logClear" class="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200">clear</button>
+      <button id="logCopy" class="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200">copy</button>
+    </div>
+  </div>
+  <div id="logBody" class="font-mono text-xs leading-snug px-4 py-3 h-72 overflow-y-auto scrollbar-thin bg-slate-50 dark:bg-slate-950/50"></div>
+</div>
+
+</main>
+
+<!-- ============================== Script ============================== -->
+<script>
+'use strict';
+
+// ---------- dark mode ----------
+(function initDark() {
+  const saved = localStorage.getItem('riffle.dark');
+  const prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  if (saved === '1' || (saved === null && prefers)) document.documentElement.classList.add('dark');
+})();
+document.getElementById('darkToggle').onclick = () => {
+  const isDark = document.documentElement.classList.toggle('dark');
+  localStorage.setItem('riffle.dark', isDark ? '1' : '0');
+};
+
+// ---------- toasts ----------
+function toast(msg, kind = 'info') {
+  const el = document.createElement('div');
+  const tones = {
+    info:  'bg-slate-800 text-white',
+    error: 'bg-rose-600 text-white',
+    ok:    'bg-emerald-600 text-white',
+  };
+  el.className = `toast px-3 py-2 rounded-md text-sm shadow-lg ${tones[kind] || tones.info}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+
+// ---------- tabs ----------
+const tabBtns = document.querySelectorAll('.tab-btn');
+const tabPanels = document.querySelectorAll('.tab-panel');
+function activateTab(name) {
+  tabBtns.forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('bg-indigo-50', on);
+    b.classList.toggle('text-indigo-700', on);
+    b.classList.toggle('dark:bg-indigo-900/40', on);
+    b.classList.toggle('dark:text-indigo-300', on);
+  });
+  tabPanels.forEach(p => {
+    p.hidden = p.id !== 'tab-' + name;
+  });
+  localStorage.setItem('riffle.tab', name);
+}
+tabBtns.forEach(b => b.onclick = () => activateTab(b.dataset.tab));
+activateTab(localStorage.getItem('riffle.tab') || 'stream');
+
+// ---------- form persistence ----------
+function loadForm(formId, key) {
+  const saved = JSON.parse(localStorage.getItem('riffle.form.' + key) || 'null');
+  if (!saved) return;
+  const form = document.getElementById(formId);
+  for (const [k, v] of Object.entries(saved)) {
+    const el = form.elements[k];
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = !!v;
+    else el.value = v == null ? '' : v;
+  }
+}
+function persistForm(formId, key) {
+  const form = document.getElementById(formId);
+  const obj = {};
+  Array.from(form.elements).forEach(el => {
+    if (!el.name) return;
+    obj[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  localStorage.setItem('riffle.form.' + key, JSON.stringify(obj));
+}
+['streamForm', 'createForm', 'inspectForm'].forEach(id => {
+  const key = id.replace('Form', '');
+  loadForm(id, key);
+  document.getElementById(id).addEventListener('input', () => persistForm(id, key));
+});
+
+function formObject(form) {
+  const fd = new FormData(form);
+  const o = {};
+  for (const [k, v] of fd.entries()) {
+    if (v === '') continue;
+    o[k] = v;
+  }
+  // checkboxes
+  Array.from(form.elements).forEach(el => {
+    if (el.type === 'checkbox') o[el.name] = el.checked;
+  });
+  return o;
+}
+
+// ---------- copy CLI ----------
+function buildCli(tab) {
+  if (tab === 'stream') {
+    const o = formObject(document.getElementById('streamForm'));
+    const parts = ['riffle stream'];
+    if (o.source_uri) parts.push(`--source-uri "${o.source_uri}"`);
+    if (o.target_uri) parts.push(`--target-uri "${o.target_uri}"`);
+    if (o.sink_mode) parts.push(`--sink-mode ${o.sink_mode}`);
+    if (o.merge_keys) parts.push(`--merge-keys "${o.merge_keys}"`);
+    if (o.merge_update_columns) parts.push(`--merge-update-columns "${o.merge_update_columns}"`);
+    if (o.merge_update_predicate) parts.push(`--merge-update-predicate "${o.merge_update_predicate}"`);
+    if (o.merge_delete_predicate) parts.push(`--merge-delete-predicate "${o.merge_delete_predicate}"`);
+    if (o.merge_insert_predicate) parts.push(`--merge-insert-predicate "${o.merge_insert_predicate}"`);
+    if (o.merge_dedupe_order_by) parts.push(`--merge-dedupe-order-by "${o.merge_dedupe_order_by}"`);
+    if (o.start_version) parts.push(`--start-version ${o.start_version}`);
+    if (o.end_version) parts.push(`--end-version ${o.end_version}`);
+    if (o.poll_interval_secs) parts.push(`--poll-interval-secs ${o.poll_interval_secs}`);
+    if (o.max_versions_per_batch) parts.push(`--max-versions-per-batch ${o.max_versions_per_batch}`);
+    if (o.read_concurrency) parts.push(`--read-concurrency ${o.read_concurrency}`);
+    if (o.azure_auth) parts.push(`--azure-auth ${o.azure_auth}`);
+    if (o.checkpoint_file) parts.push(`--checkpoint-file "${o.checkpoint_file}"`);
+    if (o.once) parts.push(`--once`);
+    return parts.join(' \\\n  ');
+  }
+  if (tab === 'create-table') {
+    const o = formObject(document.getElementById('createForm'));
+    const parts = ['riffle create-table'];
+    if (o.uri) parts.push(`--uri "${o.uri}"`);
+    if (o.rows) parts.push(`--rows ${o.rows}`);
+    if (o.commits) parts.push(`--commits ${o.commits}`);
+    if (o.columns) parts.push(`--columns ${o.columns}`);
+    if (o.zorder_by) parts.push(`--zorder-by "${o.zorder_by}"`);
+    if (o.azure_auth) parts.push(`--azure-auth ${o.azure_auth}`);
+    if (o.overwrite) parts.push(`--overwrite`);
+    return parts.join(' \\\n  ');
+  }
+  return '';
+}
+document.querySelectorAll('.copy-cli').forEach(b => {
+  b.onclick = (e) => {
+    e.preventDefault();
+    const cli = buildCli(b.dataset.tab);
+    navigator.clipboard.writeText(cli).then(() => toast('CLI copied', 'ok'));
+  };
+});
+
+// ---------- coerce types for JSON ----------
+function coerce(o, intKeys, boolKeys) {
+  intKeys.forEach(k => { if (k in o && o[k] !== '') o[k] = parseInt(o[k], 10); else delete o[k]; });
+  boolKeys.forEach(k => { o[k] = !!o[k]; });
+  return o;
+}
+
+// ---------- stream form ----------
+const streamForm = document.getElementById('streamForm');
+const streamRunBtn = document.getElementById('streamRunBtn');
+let streamRunning = false;
+
+streamForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (streamRunning) {
+    streamRunBtn.disabled = true;
+    try {
+      const r = await fetch('/api/sink/stop', { method: 'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      toast('Stream stop requested', 'ok');
+    } catch (err) { toast('Stop failed: ' + err.message, 'error'); }
+    finally { streamRunBtn.disabled = false; }
+    return;
+  }
+  const o = formObject(streamForm);
+  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'read_concurrency'], ['once']);
+  streamRunBtn.disabled = true;
+  try {
+    const r = await fetch('/api/sink/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
+    if (!r.ok) throw new Error(await r.text());
+    toast('Stream started', 'ok');
+  } catch (err) { toast('Start failed: ' + err.message, 'error'); }
+  finally { streamRunBtn.disabled = false; }
+});
+
+// ---------- create-table form ----------
+const createForm = document.getElementById('createForm');
+const createRunBtn = document.getElementById('createRunBtn');
+let createRunning = false;
+
+createForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (createRunning) {
+    createRunBtn.disabled = true;
+    try {
+      const r = await fetch('/api/create-table/stop', { method: 'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      toast('Create-table stop requested', 'ok');
+    } catch (err) { toast('Stop failed: ' + err.message, 'error'); }
+    finally { createRunBtn.disabled = false; }
+    return;
+  }
+  const o = formObject(createForm);
+  coerce(o, ['rows', 'commits', 'columns'], ['overwrite']);
+  createRunBtn.disabled = true;
+  try {
+    const r = await fetch('/api/create-table/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
+    if (!r.ok) throw new Error(await r.text());
+    toast('Create-table started', 'ok');
+  } catch (err) { toast('Start failed: ' + err.message, 'error'); }
+  finally { createRunBtn.disabled = false; }
+});
+
+// ---------- inspect ----------
+document.getElementById('inspectForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const o = formObject(e.target);
+  const btn = document.getElementById('inspectBtn');
+  btn.disabled = true;
+  document.getElementById('inspectError').classList.add('hidden');
+  try {
+    const url = new URL('/api/tables/inspect', location.origin);
+    url.searchParams.set('uri', o.uri);
+    url.searchParams.set('azure_auth', o.azure_auth || 'auto');
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    renderInspect(data);
+  } catch (err) {
+    const ee = document.getElementById('inspectError');
+    ee.textContent = err.message;
+    ee.classList.remove('hidden');
+    document.getElementById('inspectSummary').classList.add('hidden');
+    document.getElementById('inspectSchema').classList.add('hidden');
+    document.getElementById('inspectCommits').classList.add('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderInspect(d) {
+  document.getElementById('insVersion').textContent = d.version;
+  document.getElementById('insFiles').textContent = d.num_files;
+  document.getElementById('insRows').textContent = (d.estimated_rows || 0).toLocaleString();
+  document.getElementById('insParts').textContent = d.partition_columns?.length ? d.partition_columns.join(', ') : '(none)';
+  document.getElementById('inspectSummary').classList.remove('hidden');
+
+  const tbody = document.getElementById('insSchemaBody');
+  tbody.innerHTML = '';
+  (d.schema || []).forEach(col => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-slate-100 dark:border-slate-800';
+    tr.innerHTML = `<td class="px-3 py-1.5 font-mono">${escape(col.name)}</td><td class="px-3 py-1.5 font-mono text-slate-500 dark:text-slate-400">${escape(col.data_type)}</td><td class="px-3 py-1.5 text-slate-500 dark:text-slate-400">${col.nullable ? 'yes' : 'no'}</td>`;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('inspectSchema').classList.remove('hidden');
+
+  const cb = document.getElementById('insCommitsBody');
+  cb.innerHTML = '';
+  (d.commits || []).forEach(c => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-slate-100 dark:border-slate-800';
+    tr.innerHTML = `<td class="px-3 py-1.5 font-mono">${c.version}</td><td class="px-3 py-1.5 text-slate-500 dark:text-slate-400">${escape(c.timestamp || '')}</td><td class="px-3 py-1.5 font-mono">${escape(c.operation || '')}</td>`;
+    cb.appendChild(tr);
+  });
+  document.getElementById('inspectCommits').classList.remove('hidden');
+}
+function escape(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---------- state SSE ----------
+function fmt(n) { return (n ?? 0).toLocaleString(); }
+function setRunButton(btn, running, runLabel, stopLabel) {
+  btn.textContent = running ? stopLabel : runLabel;
+  btn.classList.toggle('bg-rose-600', running);
+  btn.classList.toggle('hover:bg-rose-700', running);
+  btn.classList.toggle('bg-indigo-600', !running);
+  btn.classList.toggle('hover:bg-indigo-700', !running);
+}
+
+const evt = new EventSource('/events');
+evt.onmessage = (e) => {
+  let s; try { s = JSON.parse(e.data); } catch { return; }
+
+  // global pill
+  const aj = s.active_job;
+  const pill = document.getElementById('globalStatus');
+  if (aj) {
+    pill.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>${aj} running`;
+    pill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300';
+  } else {
+    pill.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>idle`;
+    pill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300';
+  }
+
+  // ---- stream ----
+  const sk = s.sink || {};
+  streamRunning = !!sk.running;
+  setRunButton(streamRunBtn, streamRunning, 'Start streaming', 'Stop streaming');
+  document.getElementById('streamKpiStatus').textContent = sk.status || 'idle';
+  document.getElementById('streamKpiBatches').textContent = fmt(sk.batches_processed);
+  document.getElementById('streamKpiVersion').textContent = sk.target_version ?? '—';
+  document.getElementById('streamKpiLatency').textContent = fmt(sk.avg_duration_ms);
+  document.getElementById('streamKpiInserts').textContent = fmt(sk.total_inserts);
+  document.getElementById('streamKpiUpdates').textContent = fmt(sk.total_updates);
+  document.getElementById('streamKpiDeletes').textContent = fmt(sk.total_deletes);
+  document.getElementById('streamKpiAppended').textContent = fmt(sk.total_appended);
+
+  const tbody = document.getElementById('streamEventsBody');
+  if (sk.events && sk.events.length) {
+    tbody.innerHTML = sk.events.slice(-10).reverse().map(ev => `
+      <tr class="border-t border-slate-100 dark:border-slate-800">
+        <td class="px-3 py-1.5 font-mono text-slate-500">${escape(ev.timestamp)}</td>
+        <td class="px-3 py-1.5">${escape(ev.mode)}</td>
+        <td class="px-3 py-1.5 text-right">${fmt(ev.source_rows)}</td>
+        <td class="px-3 py-1.5 text-right text-emerald-600">${fmt(ev.inserts)}</td>
+        <td class="px-3 py-1.5 text-right text-amber-600">${fmt(ev.updates)}</td>
+        <td class="px-3 py-1.5 text-right text-rose-600">${fmt(ev.deletes)}</td>
+        <td class="px-3 py-1.5 text-right text-sky-600">${fmt(ev.appended)}</td>
+        <td class="px-3 py-1.5 text-right">${ev.target_version}</td>
+        <td class="px-3 py-1.5 text-right">${ev.duration_ms}</td>
+      </tr>`).join('');
+  }
+
+  // ---- create-table ----
+  const ct = s.create_table || {};
+  createRunning = !!ct.running;
+  setRunButton(createRunBtn, createRunning, 'Create table', 'Stop creation');
+  document.getElementById('createStatus').textContent = ct.status || 'idle';
+  document.getElementById('createTargetUri').textContent = ct.target_uri || '—';
+  const cd = ct.commits_done || 0, tc = ct.total_commits || 0;
+  document.getElementById('createCommitsLabel').textContent = `${cd} / ${tc}`;
+  document.getElementById('createCommitsBar').style.width = tc ? `${(cd/tc)*100}%` : '0%';
+  const rw = ct.rows_written || 0, tr = ct.total_rows || 0;
+  document.getElementById('createRowsLabel').textContent = `${fmt(rw)} / ${fmt(tr)}`;
+  document.getElementById('createRowsBar').style.width = tr ? `${(rw/tr)*100}%` : '0%';
+  document.getElementById('createLastMs').textContent = ct.last_commit_ms || '—';
+  document.getElementById('createOptimize').textContent = ct.optimize_status || '—';
+  const ce = document.getElementById('createError');
+  if (ct.last_error) { ce.textContent = ct.last_error; ce.classList.remove('hidden'); }
+  else { ce.classList.add('hidden'); }
+};
+evt.onerror = () => { /* silent reconnect */ };
+
+// ---------- logs SSE ----------
+const logBody = document.getElementById('logBody');
+const logLevel = document.getElementById('logLevel');
+const logAuto = document.getElementById('logAutoScroll');
+let logLines = [];
+const LOG_MAX = 1000;
+
+function levelBadge(l) {
+  const map = {
+    ERROR: 'text-rose-600 dark:text-rose-400',
+    WARN:  'text-amber-600 dark:text-amber-400',
+    INFO:  'text-sky-600 dark:text-sky-400',
+    DEBUG: 'text-slate-500',
+    TRACE: 'text-slate-400',
+  };
+  return map[l] || 'text-slate-500';
+}
+
+function renderLogs() {
+  const filter = (logLevel.value || '').toUpperCase();
+  const html = logLines.filter(l => !filter || l.level === filter).map(l => `
+    <div class="log-line">
+      <span class="text-slate-400">${escape(l.ts)}</span>
+      <span class="${levelBadge(l.level)}">${escape(l.level)}</span>
+      <span class="text-slate-600 dark:text-slate-300">${escape(l.message)}</span>
+    </div>
+  `).join('');
+  logBody.innerHTML = html;
+  if (logAuto.checked) logBody.scrollTop = logBody.scrollHeight;
+}
+logLevel.addEventListener('change', renderLogs);
+document.getElementById('logClear').onclick = () => { logLines = []; renderLogs(); };
+document.getElementById('logCopy').onclick = () => {
+  navigator.clipboard.writeText(logLines.map(l => `${l.ts} ${l.level} ${l.message}`).join('\n'))
+    .then(() => toast('Logs copied', 'ok'));
+};
+
+const logEvt = new EventSource('/api/logs');
+logEvt.onmessage = (e) => {
+  let arr; try { arr = JSON.parse(e.data); } catch { return; }
+  if (!Array.isArray(arr)) return;
+  for (const l of arr) logLines.push(l);
+  if (logLines.length > LOG_MAX) logLines.splice(0, logLines.length - LOG_MAX);
+  renderLogs();
+};
+logEvt.onerror = () => { /* silent reconnect */ };
+
+</script>
 </body>
 </html>

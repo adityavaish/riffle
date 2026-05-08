@@ -14,6 +14,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use deltalake::open_table_with_storage_options;
+use object_store::ObjectStoreExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ use crate::sink::{self, SinkConfig, SinkOutcome};
 use crate::state::{
     fmt_ckpt, ConsumerEvent, DiskCheckpoint, SharedState, SinkEvent, TunableConfig,
 };
+use crate::util::{parse_table_uri, version_to_i64};
 
 const MAX_MERGE_VERSIONS: usize = 10;
 
@@ -74,7 +76,8 @@ pub async fn run(
 
     // Wait for the table to exist (producer might not have created it yet).
     loop {
-        match open_table_with_storage_options(&cfg.table_uri, storage_options.clone()).await {
+        let table_url = parse_table_uri(&cfg.table_uri)?;
+        match open_table_with_storage_options(table_url, storage_options.clone()).await {
             Ok(_) => {
                 if fresh {
                     save_checkpoint(&cfg.checkpoint_file, &ckpt).ok();
@@ -106,12 +109,13 @@ pub async fn run(
         tokio::time::sleep(Duration::from_secs(cfg.poll_interval_secs)).await;
         let poll_start = Instant::now();
 
+        let table_url = parse_table_uri(&cfg.table_uri)?;
         let table =
-            match open_table_with_storage_options(&cfg.table_uri, storage_options.clone()).await {
+            match open_table_with_storage_options(table_url, storage_options.clone()).await {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-        let current_version = table.version();
+        let current_version = version_to_i64(table.version());
 
         if current_version <= last_version {
             let mut s = state.lock().await;
@@ -381,6 +385,7 @@ fn build_sink_config(cfg: &Config) -> Result<SinkConfig> {
         cfg.merge_update_predicate.clone(),
         cfg.merge_delete_predicate.clone(),
         cfg.merge_insert_predicate.clone(),
+        None,
     )?;
     Ok(SinkConfig {
         source_uri: cfg.table_uri.clone(),
@@ -388,6 +393,7 @@ fn build_sink_config(cfg: &Config) -> Result<SinkConfig> {
         source_storage_options: cfg.storage_options()?,
         target_storage_options: cfg.target_storage_options()?,
         mode,
+        read_concurrency: 8,
     })
 }
 
@@ -455,12 +461,12 @@ pub fn save_checkpoint(path: &str, c: &DiskCheckpoint) -> Result<()> {
 /// This is a cheap pre-pass that lets us decide whether to split, merge, or
 /// process a version one-shot without actually reading any Parquet data.
 async fn inspect_version(table: &deltalake::DeltaTable, version: i64) -> Result<VersionInfo> {
-    use deltalake::storage::commit_uri_from_version;
+    use deltalake::logstore::commit_uri_from_version;
 
     let log_store = table.log_store();
-    let commit_path = commit_uri_from_version(version);
+    let commit_path = commit_uri_from_version(Some(version as u64));
     let bytes = log_store
-        .object_store()
+        .object_store(None)
         .get(&commit_path)
         .await?
         .bytes()
@@ -501,9 +507,10 @@ async fn inspect_version(table: &deltalake::DeltaTable, version: i64) -> Result<
 
 pub async fn capture_baseline_version(cfg: &Config) -> Result<i64> {
     let storage_options = cfg.storage_options()?;
-    match open_table_with_storage_options(&cfg.table_uri, storage_options).await {
+    let table_url = parse_table_uri(&cfg.table_uri)?;
+    match open_table_with_storage_options(table_url, storage_options).await {
         Ok(t) => {
-            let v = t.version();
+            let v = version_to_i64(t.version());
             tracing::info!("[init] pre-launch baseline: table exists at v{}", v);
             Ok(v)
         }

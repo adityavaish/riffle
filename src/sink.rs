@@ -22,14 +22,16 @@ use deltalake::datafusion::logical_expr::col;
 use deltalake::operations::create::CreateBuilder;
 use deltalake::operations::merge::MergeMetrics;
 use deltalake::protocol::SaveMode;
-use deltalake::{open_table_with_storage_options, DeltaOps, DeltaTable};
-use futures::stream::TryStreamExt;
+use deltalake::{open_table_with_storage_options, DeltaOps, DeltaTable, ObjectStore};
+use futures::stream::{StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectStorePath;
-use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+
+use crate::util::{parse_table_uri, version_to_i64};
 
 #[derive(Debug, Clone)]
 pub enum SinkMode {
@@ -65,6 +67,9 @@ pub struct MergeSpec {
     pub when_matched_delete_predicate: Option<String>,
     /// Optional predicate gating `WHEN NOT MATCHED INSERT`.
     pub when_not_matched_insert_predicate: Option<String>,
+    /// Optional column to order by when deduplicating source rows that share a merge key
+    /// (descending — most recent kept). If empty, source dedup keeps an arbitrary row per key.
+    pub dedupe_order_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +79,8 @@ pub struct SinkConfig {
     pub source_storage_options: HashMap<String, String>,
     pub target_storage_options: HashMap<String, String>,
     pub mode: SinkMode,
+    /// Number of source parquet files to read in parallel. Defaults to 8 if 0.
+    pub read_concurrency: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -92,12 +99,12 @@ pub struct SinkOutcome {
 // ---------------------------------------------------------------------------
 
 async fn read_added_paths(table: &DeltaTable, version: i64) -> Result<Vec<String>> {
-    use deltalake::storage::commit_uri_from_version;
+    use deltalake::logstore::commit_uri_from_version;
 
     let log_store = table.log_store();
-    let commit_path = commit_uri_from_version(version);
+    let commit_path = commit_uri_from_version(Some(version as u64));
     let bytes = log_store
-        .object_store()
+        .object_store(None)
         .get(&commit_path)
         .await?
         .bytes()
@@ -134,7 +141,7 @@ async fn read_parquet_file(
         .await
         .with_context(|| format!("HEAD failed for {}", rel_path))?;
 
-    let reader = ParquetObjectReader::new(object_store, meta);
+    let reader = ParquetObjectReader::new(object_store, path).with_file_size(meta.size);
     let stream = ParquetRecordBatchStreamBuilder::new(reader)
         .await?
         .build()?;
@@ -143,11 +150,15 @@ async fn read_parquet_file(
 }
 
 /// Read every parquet file added by the given source versions.
+///
+/// `read_concurrency` controls how many parquet files are fetched in parallel
+/// (clamped to `[1, all_paths.len()]`).
 pub async fn read_added_rows(
     source: &DeltaTable,
     versions: &[i64],
+    read_concurrency: usize,
 ) -> Result<(Vec<RecordBatch>, ArrowSchemaRef, u64)> {
-    let object_store = source.log_store().object_store();
+    let object_store = source.log_store().object_store(None);
     let mut all_paths: Vec<String> = Vec::new();
     let t_paths = Instant::now();
     for v in versions {
@@ -155,41 +166,62 @@ pub async fn read_added_rows(
         tracing::debug!("[sink] v{} contributes {} added file(s)", v, p.len());
         all_paths.append(&mut p);
     }
+    let total_files = all_paths.len();
     tracing::info!(
         "[sink] discovered {} added file(s) across {} version(s) in {}ms",
-        all_paths.len(),
+        total_files,
         versions.len(),
         t_paths.elapsed().as_millis()
     );
 
+    let concurrency = read_concurrency.max(1).min(total_files.max(1));
+    tracing::info!(
+        "[sink] reading {} file(s) with concurrency={}",
+        total_files,
+        concurrency
+    );
+
+    // Fan out file reads in parallel while preserving completion ordering for logs.
+    let store = object_store.clone();
+    let read_results: Vec<(usize, String, Vec<RecordBatch>, u64, u128)> =
+        futures::stream::iter(all_paths.into_iter().enumerate())
+            .map(|(idx, path)| {
+                let store = store.clone();
+                async move {
+                    let t_file = Instant::now();
+                    let batches = read_parquet_file(store, &path).await?;
+                    let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+                    Ok::<_, anyhow::Error>((idx, path, batches, rows, t_file.elapsed().as_millis()))
+                }
+            })
+            .buffer_unordered(concurrency)
+            .try_collect()
+            .await?;
+
     let mut all_batches: Vec<RecordBatch> = Vec::new();
     let mut schema: Option<ArrowSchemaRef> = None;
     let mut total_rows: u64 = 0;
-    for (idx, p) in all_paths.iter().enumerate() {
-        let t_file = Instant::now();
-        let batches = read_parquet_file(object_store.clone(), p).await?;
-        let mut file_rows: u64 = 0;
+    for (idx, path, batches, rows, ms) in read_results {
         for b in batches {
             if schema.is_none() {
                 schema = Some(b.schema());
             }
-            file_rows += b.num_rows() as u64;
             all_batches.push(b);
         }
-        total_rows += file_rows;
+        total_rows += rows;
         tracing::debug!(
             "[sink] read file {}/{} ({}) -> {} rows in {}ms",
             idx + 1,
-            all_paths.len(),
-            p,
-            file_rows,
-            t_file.elapsed().as_millis()
+            total_files,
+            path,
+            rows,
+            ms
         );
     }
     tracing::info!(
         "[sink] read total {} row(s) from {} file(s)",
         total_rows,
-        all_paths.len()
+        total_files
     );
 
     let schema = schema.ok_or_else(|| anyhow!("no rows added in versions {:?}", versions))?;
@@ -205,7 +237,8 @@ async fn open_or_create_target(
     storage_opts: &HashMap<String, String>,
     source_schema: &ArrowSchemaRef,
 ) -> Result<DeltaTable> {
-    match open_table_with_storage_options(target_uri, storage_opts.clone()).await {
+    let target_url = parse_table_uri(target_uri)?;
+    match open_table_with_storage_options(target_url, storage_opts.clone()).await {
         Ok(t) => Ok(t),
         Err(_) => {
             tracing::info!("[sink] target table not found at {}; creating", target_uri);
@@ -213,10 +246,11 @@ async fn open_or_create_target(
                 .fields()
                 .iter()
                 .map(|f| {
+                    use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
                     let dt: deltalake::kernel::DataType =
                         (&deltalake::arrow::datatypes::DataType::from(f.data_type().clone()))
-                            .try_into()
-                            .map_err(|e: deltalake::arrow::error::ArrowError| {
+                            .try_into_kernel()
+                            .map_err(|e| {
                                 anyhow!("schema convert failed for {}: {}", f.name(), e)
                             })?;
                     Ok::<_, anyhow::Error>(deltalake::kernel::StructField::new(
@@ -260,7 +294,8 @@ pub async fn apply(
         cfg.target_uri
     );
 
-    let (batches, schema, source_rows) = read_added_rows(source, versions).await?;
+    let concurrency = if cfg.read_concurrency == 0 { 8 } else { cfg.read_concurrency };
+    let (batches, schema, source_rows) = read_added_rows(source, versions, concurrency).await?;
     if batches.is_empty() {
         tracing::info!("[sink] no batches to apply (empty source contributions)");
         return Ok(SinkOutcome {
@@ -280,7 +315,7 @@ pub async fn apply(
         open_or_create_target(&cfg.target_uri, &cfg.target_storage_options, &schema).await?;
     tracing::debug!(
         "[sink] target opened (v{}) in {}ms",
-        target.version(),
+        version_to_i64(target.version()),
         t_open.elapsed().as_millis()
     );
 
@@ -315,7 +350,7 @@ async fn apply_append(
     Ok(SinkOutcome {
         source_rows,
         appended: source_rows,
-        target_version: merged.version(),
+        target_version: version_to_i64(merged.version()),
         ..Default::default()
     })
 }
@@ -332,7 +367,7 @@ async fn apply_overwrite(
     Ok(SinkOutcome {
         source_rows,
         appended: source_rows,
-        target_version: merged.version(),
+        target_version: version_to_i64(merged.version()),
         ..Default::default()
     })
 }
@@ -352,6 +387,38 @@ async fn apply_merge(
     let df = ctx
         .read_batches(batches)
         .map_err(|e: DataFusionError| anyhow!("read_batches failed: {}", e))?;
+
+    // Source-side dedup on merge keys to avoid the "MERGE matched a target row with multiple
+    // source rows" error. Use ROW_NUMBER() OVER (PARTITION BY keys ORDER BY <order_col DESC | NULL>)
+    // and keep rn = 1.
+    let df = {
+        let view_name = "__riffle_merge_src";
+        ctx.register_table(view_name, df.into_view())
+            .map_err(|e: DataFusionError| anyhow!("register source view failed: {}", e))?;
+        let part_by = spec
+            .keys
+            .iter()
+            .map(|k| format!("\"{}\"", k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let order_by = match &spec.dedupe_order_by {
+            Some(c) if !c.is_empty() => format!("\"{}\" DESC", c),
+            _ => "(SELECT 1)".to_string(),
+        };
+        let cols = schema
+            .fields()
+            .iter()
+            .map(|f| format!("\"{}\"", f.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {cols} FROM (SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY {part_by} ORDER BY {order_by}) AS __rn FROM {view_name}) WHERE __rn = 1"
+        );
+        tracing::debug!("[sink] merge source dedup sql: {}", sql);
+        ctx.sql(&sql)
+            .await
+            .map_err(|e: DataFusionError| anyhow!("dedup sql failed: {}", e))?
+    };
 
     // Determine which columns are updated by WHEN MATCHED UPDATE.
     let key_set: std::collections::HashSet<&str> = spec.keys.iter().map(|s| s.as_str()).collect();
@@ -424,7 +491,7 @@ async fn apply_merge(
         inserts: metrics.num_target_rows_inserted as u64,
         updates: metrics.num_target_rows_updated as u64,
         deletes: metrics.num_target_rows_deleted as u64,
-        target_version: merged_table.version(),
+        target_version: version_to_i64(merged_table.version()),
         ..Default::default()
     })
 }
@@ -440,6 +507,7 @@ pub fn parse_mode(
     when_matched_update_predicate: Option<String>,
     when_matched_delete_predicate: Option<String>,
     when_not_matched_insert_predicate: Option<String>,
+    dedupe_order_by: Option<String>,
 ) -> Result<SinkMode> {
     match mode.to_ascii_lowercase().as_str() {
         "append" => Ok(SinkMode::Append),
@@ -464,6 +532,7 @@ pub fn parse_mode(
                 when_matched_update_predicate,
                 when_matched_delete_predicate,
                 when_not_matched_insert_predicate,
+                dedupe_order_by: dedupe_order_by.filter(|s| !s.is_empty()),
             }))
         }
         other => Err(anyhow!(

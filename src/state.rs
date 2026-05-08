@@ -1,5 +1,6 @@
 //! Shared dashboard state, tunable consumer config, and SSE payload types.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -42,11 +43,14 @@ pub struct DashboardState {
     pub producer: ProducerState,
     pub consumer: ConsumerState,
     pub sink: SinkState,
+    pub create_table: CreateTableState,
     pub config: ConfigSnapshot,
     pub table_uri: String,
     pub backend: String,
-    /// "dashboard" (producer + consumer + optional sink) or "sink-cli" (sink only).
+    /// "dashboard" (producer + consumer + optional sink) or "stream-cli" (sink only).
     pub app_mode: String,
+    /// Identifier of the currently-running job, if any: "stream" | "create-table" | "demo".
+    pub active_job: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, Default)]
@@ -152,6 +156,8 @@ pub struct SinkLaunchConfig {
     #[serde(default)]
     pub merge_insert_predicate: Option<String>,
     #[serde(default)]
+    pub merge_dedupe_order_by: Option<String>,
+    #[serde(default)]
     pub start_version: Option<i64>,
     #[serde(default)]
     pub end_version: Option<i64>,
@@ -161,6 +167,8 @@ pub struct SinkLaunchConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_max_versions")]
     pub max_versions_per_batch: usize,
+    #[serde(default = "default_read_concurrency")]
+    pub read_concurrency: usize,
     #[serde(default = "default_azure_auth")]
     pub azure_auth: String,
     #[serde(default = "default_checkpoint")]
@@ -169,8 +177,9 @@ pub struct SinkLaunchConfig {
 
 fn default_poll_interval() -> u64 { 5 }
 fn default_max_versions() -> usize { 10 }
+fn default_read_concurrency() -> usize { 8 }
 fn default_azure_auth() -> String { "auto".to_string() }
-fn default_checkpoint() -> String { "./riffle-sink-ckpt.json".to_string() }
+fn default_checkpoint() -> String { "./riffle-stream-ckpt.json".to_string() }
 
 /// Commands sent from the web layer to the sink controller task.
 #[derive(Debug)]
@@ -193,5 +202,125 @@ pub fn fmt_ckpt(c: &DiskCheckpoint) -> String {
         format!("v{}:complete", c.last_full_version)
     } else {
         format!("v{}+chunk{}", c.last_full_version, c.partial_file_offset)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// create-table dashboard tab
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, serde::Serialize, Default)]
+pub struct CreateTableState {
+    pub running: bool,
+    pub status: String,
+    pub last_error: String,
+    pub target_uri: String,
+    pub commits_done: usize,
+    pub total_commits: usize,
+    pub rows_written: u64,
+    pub total_rows: u64,
+    pub last_commit_ms: u64,
+    pub optimize_status: String,
+    pub launch_config: Option<CreateTableLaunchConfig>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct CreateTableLaunchConfig {
+    pub uri: String,
+    #[serde(default = "default_create_rows")]
+    pub rows: usize,
+    #[serde(default = "default_create_commits")]
+    pub commits: usize,
+    #[serde(default = "default_create_columns")]
+    pub columns: usize,
+    #[serde(default = "default_zorder_by")]
+    pub zorder_by: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default = "default_azure_auth")]
+    pub azure_auth: String,
+}
+
+fn default_create_rows() -> usize { 200_000 }
+fn default_create_commits() -> usize { 1 }
+fn default_create_columns() -> usize { 30 }
+fn default_zorder_by() -> String { "event_timestamp".to_string() }
+
+#[derive(Debug)]
+pub enum CreateTableCommand {
+    Start(CreateTableLaunchConfig, tokio::sync::oneshot::Sender<Result<(), String>>),
+    Stop(tokio::sync::oneshot::Sender<Result<(), String>>),
+}
+
+// ---------------------------------------------------------------------------
+// Shared rolling log buffer
+// ---------------------------------------------------------------------------
+
+/// In-memory ring buffer of recent log lines, fed by a custom `tracing` layer
+/// and exposed via `/api/logs` SSE so any tab can tail it.
+#[derive(Clone)]
+pub struct LogBuffer {
+    inner: Arc<std::sync::Mutex<VecDeque<LogLine>>>,
+    capacity: usize,
+    seq: Arc<AtomicU64>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct LogLine {
+    pub seq: u64,
+    pub ts: String,
+    pub level: String,
+    pub target: String,
+    pub message: String,
+}
+
+impl LogBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(capacity))),
+            capacity,
+            seq: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    pub fn push(&self, level: &str, target: &str, message: String) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let line = LogLine {
+            seq,
+            ts: chrono::Utc::now().format("%H:%M:%S%.3f").to_string(),
+            level: level.to_string(),
+            target: target.to_string(),
+            message,
+        };
+        let mut g = self.inner.lock().unwrap();
+        if g.len() == self.capacity {
+            g.pop_front();
+        }
+        g.push_back(line);
+        drop(g);
+        self.notify.notify_waiters();
+    }
+
+    /// Snapshot of all currently-buffered lines.
+    pub fn snapshot(&self) -> Vec<LogLine> {
+        self.inner.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Lines after `since_seq` (exclusive).
+    pub fn since(&self, since_seq: u64) -> Vec<LogLine> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.seq > since_seq)
+            .cloned()
+            .collect()
+    }
+
+    /// Wait until at least one new line is available (or timeout fires).
+    pub async fn wait_change(&self) {
+        self.notify.notified().await;
     }
 }
