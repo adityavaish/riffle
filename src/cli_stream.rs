@@ -624,7 +624,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
         use tracing_subscriber::util::SubscriberInitExt;
         use tracing_subscriber::EnvFilter;
         let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,riffle=info"));
+            .unwrap_or_else(|_| EnvFilter::new("info,riffle=info,object_store=warn,hyper=warn,reqwest=warn"));
         let layer = log_layer::DashboardLogLayer::new(log_buffer.clone());
         let _ = tracing_subscriber::registry()
             .with(env_filter)

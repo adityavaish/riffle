@@ -23,7 +23,10 @@
   .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.4); border-radius: 3px; }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-  .log-line { white-space: pre-wrap; word-break: break-word; }
+  .log-line { display: flex; gap: 0.5rem; align-items: baseline; padding: 1px 0; }
+  .log-line .log-msg { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  .log-line .log-ts { color: rgb(148 163 184); flex-shrink: 0; width: 7.5rem; }
+  .log-line .log-lvl { flex-shrink: 0; width: 3rem; font-weight: 600; }
   /* fade-in for tabs */
   .tab-panel[hidden] { display: none; }
   .toast { animation: slidein 0.2s ease-out; }
@@ -791,13 +794,9 @@ function levelBadge(l) {
 
 function renderLogs() {
   const filter = (logLevel.value || '').toUpperCase();
-  const html = logLines.filter(l => !filter || l.level === filter).map(l => `
-    <div class="log-line">
-      <span class="text-slate-400">${escape(l.ts)}</span>
-      <span class="${levelBadge(l.level)}">${escape(l.level)}</span>
-      <span class="text-slate-600 dark:text-slate-300">${escape(l.message)}</span>
-    </div>
-  `).join('');
+  const html = logLines.filter(l => !filter || l.level === filter).map(l =>
+    `<div class="log-line"><span class="log-ts">${escape(l.ts)}</span><span class="log-lvl ${levelBadge(l.level)}">${escape(l.level)}</span><span class="log-msg text-slate-600 dark:text-slate-300">${escape(l.message)}</span></div>`
+  ).join('');
   logBody.innerHTML = html;
   if (logAuto.checked) logBody.scrollTop = logBody.scrollHeight;
 }
