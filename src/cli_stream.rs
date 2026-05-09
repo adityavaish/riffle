@@ -274,7 +274,9 @@ impl Controller {
                 if tokio::time::timeout(Duration::from_secs(10), h).await.is_err() {
                     tracing::warn!("[stream] sink loop did not exit within 10s (likely mid-merge); aborting hard");
                     abort_handle.abort();
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Wait long enough for the orphaned heartbeat OS thread to
+                    // see its cancellation flag and exit (5s sleep + slack).
+                    tokio::time::sleep(Duration::from_secs(6)).await;
                 } else {
                     tracing::info!("[stream] sink loop exited cleanly");
                 }
@@ -415,8 +417,28 @@ async fn run_sink_loop(
                     }
                 })
                 .expect("spawn heartbeat thread");
+            // RAII guard: if this scope unwinds (task aborted, panic, ?-bubble),
+            // signal the heartbeat thread to exit. Otherwise the OS thread keeps
+            // running indefinitely after a hard abort and the dashboard never
+            // reflects "stopped".
+            // Note: we deliberately do NOT join the OS thread here — Drop runs
+            // on a tokio worker, and a blocking join could stall it. The thread
+            // exits within 5s on its own once it sees the flag.
+            struct HbGuard {
+                done: Arc<AtomicBool>,
+            }
+            impl Drop for HbGuard {
+                fn drop(&mut self) {
+                    self.done.store(true, Ordering::Relaxed);
+                }
+            }
+            let _hb_guard = HbGuard { done: hb_done.clone() };
             let outcome_res = sink::apply(&sink_cfg, &source, &versions).await;
-            hb_done.store(true, Ordering::Relaxed);
+            // Drop the guard explicitly so the heartbeat stops emitting before
+            // we log the per-batch summary line below.
+            drop(_hb_guard);
+            // Best-effort wait for the heartbeat OS thread to exit so it can't
+            // overwrite the "Stopped" status set by the controller.
             let _ = hb_thread.join();
             let outcome = outcome_res?;
             tracing::info!(
