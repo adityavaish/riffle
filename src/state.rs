@@ -158,6 +158,12 @@ pub struct SinkLaunchConfig {
     #[serde(default)]
     pub merge_dedupe_order_by: Option<String>,
     #[serde(default)]
+    pub merge_transform_sql: Option<String>,
+    /// User-provided Rust source code (function body); compiled and loaded at stream start.
+    /// Mutually exclusive with `merge_transform_sql`.
+    #[serde(default)]
+    pub merge_transform_rust: Option<String>,
+    #[serde(default)]
     pub start_version: Option<i64>,
     #[serde(default)]
     pub end_version: Option<i64>,

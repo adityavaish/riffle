@@ -30,6 +30,8 @@ async-stream = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+libloading = "0.8"
+dirs = "5"
 
 [[bin]]
 name = "riffle"

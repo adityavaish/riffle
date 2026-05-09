@@ -52,6 +52,7 @@ pub async fn run(
         .route("/api/create-table/stop", post(stop_create_table))
         .route("/api/tables/inspect", get(inspect_table))
         .route("/api/tables/preview", get(preview_table))
+        .route("/api/transform/compile", post(compile_transform))
         .route("/api/logs", get(logs_stream))
         .route("/api/logs/snapshot", get(logs_snapshot))
         .route("/api/health", get(|| async { "ok" }))
@@ -229,6 +230,39 @@ pub struct PreviewQuery {
 }
 
 fn default_preview_limit() -> usize { 100 }
+
+#[derive(serde::Deserialize)]
+struct CompileTransformReq {
+    source: String,
+}
+
+#[derive(serde::Serialize)]
+struct CompileTransformResp {
+    ok: bool,
+    stderr: String,
+    dylib_path: Option<String>,
+}
+
+async fn compile_transform(
+    JsonExt(req): JsonExt<CompileTransformReq>,
+) -> axum::Json<CompileTransformResp> {
+    // Compilation is blocking and can take 30+s on first run; offload it.
+    let resp = tokio::task::spawn_blocking(move || crate::transform_rust::compile(&req.source))
+        .await
+        .unwrap_or_else(|e| Err(format!("join error: {e}")));
+    match resp {
+        Ok(ok) => axum::Json(CompileTransformResp {
+            ok: true,
+            stderr: ok.stderr,
+            dylib_path: Some(ok.dylib_path.display().to_string()),
+        }),
+        Err(stderr) => axum::Json(CompileTransformResp {
+            ok: false,
+            stderr,
+            dylib_path: None,
+        }),
+    }
+}
 
 async fn preview_table(
     Query(q): Query<PreviewQuery>,

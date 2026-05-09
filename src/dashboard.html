@@ -139,6 +139,31 @@
         </details>
 
         <details class="rounded-md bg-slate-50 dark:bg-slate-800/50 p-3 text-sm">
+          <summary class="cursor-pointer font-medium text-slate-700 dark:text-slate-300">Transform (pre-MERGE)</summary>
+          <div class="mt-3 space-y-2">
+            <div class="flex items-center gap-3 text-xs">
+              <label class="inline-flex items-center gap-1.5"><input type="radio" name="transform_kind" value="none" checked /> None</label>
+              <label class="inline-flex items-center gap-1.5"><input type="radio" name="transform_kind" value="sql" /> SQL</label>
+              <label class="inline-flex items-center gap-1.5"><input type="radio" name="transform_kind" value="rust" /> Rust</label>
+            </div>
+            <div data-transform-panel="sql" class="hidden space-y-1">
+              <label class="text-xs text-slate-500 dark:text-slate-400">SQL — applied to the dedup'd source as <code>__src</code>. Example: <code>SELECT id, UPPER(name) AS name, amount*1.1 AS amount FROM __src WHERE status &lt;&gt; 'deleted'</code></label>
+              <textarea name="merge_transform_sql" rows="4" placeholder="SELECT * FROM __src" class="w-full text-xs font-mono px-2 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"></textarea>
+            </div>
+            <div data-transform-panel="rust" class="hidden space-y-1">
+              <label class="text-xs text-slate-500 dark:text-slate-400">Rust — body of <code>fn transform(batch: RecordBatch) -&gt; Result&lt;RecordBatch, String&gt;</code>. Compiled on stream start; first build is slow.</label>
+              <textarea name="merge_transform_rust" rows="6" placeholder="// return the batch unchanged
+Ok(batch)" class="w-full text-xs font-mono px-2 py-2 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"></textarea>
+              <div class="flex items-center gap-2">
+                <button type="button" id="rustValidateBtn" class="px-3 py-1 text-xs rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50">Validate</button>
+                <span id="rustValidateStatus" class="text-xs text-slate-500 dark:text-slate-400"></span>
+              </div>
+              <pre id="rustValidateOutput" class="hidden whitespace-pre-wrap text-xs font-mono p-2 rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 max-h-48 overflow-auto"></pre>
+            </div>
+          </div>
+        </details>
+
+        <details class="rounded-md bg-slate-50 dark:bg-slate-800/50 p-3 text-sm">
           <summary class="cursor-pointer font-medium text-slate-700 dark:text-slate-300">Advanced</summary>
           <div class="grid grid-cols-2 gap-3 mt-3">
             <div><label class="text-xs text-slate-600 dark:text-slate-400">Start version</label><input name="start_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
@@ -532,7 +557,9 @@ function persistForm(formId, key) {
   const obj = {};
   Array.from(form.elements).forEach(el => {
     if (!el.name) return;
-    obj[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+    if (el.type === 'checkbox') obj[el.name] = el.checked;
+    else if (el.type === 'radio') { if (el.checked) obj[el.name] = el.value; }
+    else obj[el.name] = el.value;
   });
   localStorage.setItem('riffle.form.' + key, JSON.stringify(obj));
 }
@@ -570,6 +597,10 @@ function buildCli(tab) {
     if (o.merge_delete_predicate) parts.push(`--merge-delete-predicate "${o.merge_delete_predicate}"`);
     if (o.merge_insert_predicate) parts.push(`--merge-insert-predicate "${o.merge_insert_predicate}"`);
     if (o.merge_dedupe_order_by) parts.push(`--merge-dedupe-order-by "${o.merge_dedupe_order_by}"`);
+    if (o.transform_kind === 'sql' && o.merge_transform_sql) {
+      const esc = String(o.merge_transform_sql).replace(/"/g, '\\"');
+      parts.push(`--merge-transform-sql "${esc}"`);
+    }
     if (o.start_version) parts.push(`--start-version ${o.start_version}`);
     if (o.end_version) parts.push(`--end-version ${o.end_version}`);
     if (o.poll_interval_secs) parts.push(`--poll-interval-secs ${o.poll_interval_secs}`);
@@ -614,6 +645,54 @@ const streamForm = document.getElementById('streamForm');
 const streamRunBtn = document.getElementById('streamRunBtn');
 let streamRunning = false;
 
+// Transform mode toggle (None/SQL/Rust).
+function syncTransformPanels() {
+  const sel = streamForm.querySelector('input[name="transform_kind"]:checked')?.value || 'none';
+  streamForm.querySelectorAll('[data-transform-panel]').forEach(p => {
+    p.classList.toggle('hidden', p.dataset.transformPanel !== sel);
+  });
+}
+streamForm.querySelectorAll('input[name="transform_kind"]').forEach(r => r.addEventListener('change', syncTransformPanels));
+syncTransformPanels();
+
+// Rust transform Validate button.
+const rustValidateBtn = document.getElementById('rustValidateBtn');
+const rustValidateStatus = document.getElementById('rustValidateStatus');
+const rustValidateOutput = document.getElementById('rustValidateOutput');
+rustValidateBtn?.addEventListener('click', async () => {
+  const ta = streamForm.querySelector('textarea[name="merge_transform_rust"]');
+  const source = (ta?.value || '').trim();
+  if (!source) {
+    rustValidateStatus.textContent = 'Empty body';
+    rustValidateStatus.className = 'text-xs text-amber-600';
+    return;
+  }
+  rustValidateBtn.disabled = true;
+  rustValidateStatus.textContent = 'Compiling… (first build can take 30–60s)';
+  rustValidateStatus.className = 'text-xs text-slate-500 dark:text-slate-400';
+  rustValidateOutput.classList.add('hidden');
+  try {
+    const r = await fetch('/api/transform/compile', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source }) });
+    const j = await r.json();
+    if (j.ok) {
+      rustValidateStatus.textContent = '✓ Compiled';
+      rustValidateStatus.className = 'text-xs text-emerald-600';
+    } else {
+      rustValidateStatus.textContent = '✗ Compile failed';
+      rustValidateStatus.className = 'text-xs text-rose-600';
+    }
+    if (j.stderr) {
+      rustValidateOutput.textContent = j.stderr;
+      rustValidateOutput.classList.remove('hidden');
+    }
+  } catch (e) {
+    rustValidateStatus.textContent = 'Request error: ' + e.message;
+    rustValidateStatus.className = 'text-xs text-rose-600';
+  } finally {
+    rustValidateBtn.disabled = false;
+  }
+});
+
 streamForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (streamRunning) {
@@ -628,6 +707,10 @@ streamForm.addEventListener('submit', async (e) => {
   }
   const o = formObject(streamForm);
   coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'read_concurrency'], ['once']);
+  // Strip the inactive transform field so the server only sees the selected one.
+  if (o.transform_kind !== 'sql') delete o.merge_transform_sql;
+  if (o.transform_kind !== 'rust') delete o.merge_transform_rust;
+  delete o.transform_kind;
   streamRunBtn.disabled = true;
   try {
     const r = await fetch('/api/sink/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });

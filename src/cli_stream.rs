@@ -67,6 +67,19 @@ pub struct StreamArgs {
     #[arg(long)]
     merge_dedupe_order_by: Option<String>,
 
+    /// Optional SQL applied to the source dataframe before MERGE. The dedup'd source is
+    /// available as `__src`. Example:
+    ///   --merge-transform-sql "SELECT id, UPPER(name) AS name, amount*1.1 AS amount FROM __src WHERE status <> 'deleted'"
+    #[arg(long)]
+    merge_transform_sql: Option<String>,
+
+    /// Optional path to a file containing the body of a Rust function
+    /// `fn transform(batch: RecordBatch) -> Result<RecordBatch, String>`.
+    /// Compiled to a cdylib via cargo and dynamically loaded at stream start.
+    /// Mutually exclusive with --merge-transform-sql.
+    #[arg(long)]
+    merge_transform_rust_file: Option<PathBuf>,
+
     #[arg(long)]
     start_version: Option<i64>,
 
@@ -168,6 +181,14 @@ impl Controller {
             .map_err(|e| format!("source storage opts: {}", e))?;
         let target_storage = build_storage_options(&cfg.target_uri, &cfg.azure_auth)
             .map_err(|e| format!("target storage opts: {}", e))?;
+        let transform_rust_lib = match cfg.merge_transform_rust.as_deref() {
+            Some(src) if !src.trim().is_empty() => {
+                tracing::info!("[stream] compiling user Rust transform (this may take a while on first run)...");
+                Some(crate::transform_rust::compile_and_load(src)
+                    .map_err(|e| format!("rust transform: {}", e))?)
+            }
+            _ => None,
+        };
         let mode = sink::parse_mode(
             &cfg.sink_mode,
             &cfg.merge_keys,
@@ -176,6 +197,8 @@ impl Controller {
             cfg.merge_delete_predicate.clone(),
             cfg.merge_insert_predicate.clone(),
             cfg.merge_dedupe_order_by.clone(),
+            cfg.merge_transform_sql.clone(),
+            transform_rust_lib,
         )
         .map_err(|e| format!("parse_mode: {}", e))?;
 
@@ -725,6 +748,17 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                 merge_delete_predicate: args.merge_delete_predicate.clone(),
                 merge_insert_predicate: args.merge_insert_predicate.clone(),
                 merge_dedupe_order_by: args.merge_dedupe_order_by.clone(),
+                merge_transform_sql: args.merge_transform_sql.clone(),
+                merge_transform_rust: match args.merge_transform_rust_file.as_ref() {
+                    Some(p) => match std::fs::read_to_string(p) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            eprintln!("Failed to read {}: {}", p.display(), e);
+                            return Ok(());
+                        }
+                    },
+                    None => None,
+                },
                 start_version: args.start_version,
                 end_version: args.end_version,
                 once: args.once,

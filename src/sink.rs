@@ -70,6 +70,13 @@ pub struct MergeSpec {
     /// Optional column to order by when deduplicating source rows that share a merge key
     /// (descending — most recent kept). If empty, source dedup keeps an arbitrary row per key.
     pub dedupe_order_by: Option<String>,
+    /// Optional user-provided SQL applied to the source dataframe before MERGE.
+    /// The dedup'd source is registered as `__src`; the SQL must reference it.
+    /// Example: `SELECT id, UPPER(name) AS name, amount * 1.1 AS amount FROM __src WHERE status <> 'deleted'`.
+    pub transform_sql: Option<String>,
+    /// Optional compiled-and-loaded Rust transform applied to the dedup'd
+    /// source RecordBatches before MERGE. Mutually exclusive with `transform_sql`.
+    pub transform_rust: Option<Arc<crate::transform_rust::TransformLib>>,
 }
 
 #[derive(Debug, Clone)]
@@ -420,9 +427,58 @@ async fn apply_merge(
             .map_err(|e: DataFusionError| anyhow!("dedup sql failed: {}", e))?
     };
 
-    // Determine which columns are updated by WHEN MATCHED UPDATE.
+    // Optional user Rust transform: collect dedup'd source -> apply -> rebuild df.
+    let df = if let Some(rust_lib) = spec.transform_rust.as_ref() {
+        tracing::debug!("[sink] applying user-supplied Rust transform");
+        let in_batches = df
+            .collect()
+            .await
+            .map_err(|e: DataFusionError| anyhow!("collect for rust transform: {}", e))?;
+        let mut out_batches = Vec::with_capacity(in_batches.len());
+        for b in &in_batches {
+            let nb = rust_lib.apply(b).context("rust transform apply")?;
+            out_batches.push(nb);
+        }
+        ctx.read_batches(out_batches)
+            .map_err(|e: DataFusionError| anyhow!("read_batches after rust transform failed: {}", e))?
+    } else {
+        df
+    };
+
+    // Optional user SQL transform: run it against the dedup'd source as `__src`.
+    let df = if let Some(user_sql) = spec.transform_sql.as_deref().filter(|s| !s.trim().is_empty()) {
+        let view = "__src";
+        // Drop a previous registration if any (from an earlier batch in the same loop iteration).
+        let _ = ctx.deregister_table(view);
+        ctx.register_table(view, df.into_view())
+            .map_err(|e: DataFusionError| anyhow!("register __src failed: {}", e))?;
+        tracing::debug!("[sink] applying transform_sql: {}", user_sql.trim());
+        ctx.sql(user_sql)
+            .await
+            .map_err(|e: DataFusionError| anyhow!("transform_sql failed: {}", e))?
+    } else {
+        df
+    };
+
+    // Determine which columns are updated by WHEN MATCHED UPDATE. Use the (possibly-transformed)
+    // dataframe's schema so transforms that rename/drop columns are honoured.
     let key_set: std::collections::HashSet<&str> = spec.keys.iter().map(|s| s.as_str()).collect();
-    let all_cols: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    let df_arrow_schema: ArrowSchemaRef = Arc::new(df.schema().as_arrow().clone());
+    let all_cols: Vec<String> = df_arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    // Sanity-check: every merge key must still be present after the transform.
+    for k in &spec.keys {
+        if !all_cols.iter().any(|c| c == k) {
+            return Err(anyhow!(
+                "merge key '{}' missing from source after transform; columns: [{}]",
+                k,
+                all_cols.join(", ")
+            ));
+        }
+    }
     let update_cols: Vec<String> = if spec.update_columns.is_empty() {
         all_cols.iter().filter(|c| !key_set.contains(c.as_str())).cloned().collect()
     } else {
@@ -508,6 +564,8 @@ pub fn parse_mode(
     when_matched_delete_predicate: Option<String>,
     when_not_matched_insert_predicate: Option<String>,
     dedupe_order_by: Option<String>,
+    transform_sql: Option<String>,
+    transform_rust: Option<Arc<crate::transform_rust::TransformLib>>,
 ) -> Result<SinkMode> {
     match mode.to_ascii_lowercase().as_str() {
         "append" => Ok(SinkMode::Append),
@@ -526,6 +584,12 @@ pub fn parse_mode(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+            let transform_sql = transform_sql.filter(|s| !s.trim().is_empty());
+            if transform_sql.is_some() && transform_rust.is_some() {
+                return Err(anyhow!(
+                    "--merge-transform-sql and --merge-transform-rust-file are mutually exclusive"
+                ));
+            }
             Ok(SinkMode::Merge(MergeSpec {
                 keys,
                 update_columns,
@@ -533,6 +597,8 @@ pub fn parse_mode(
                 when_matched_delete_predicate,
                 when_not_matched_insert_predicate,
                 dedupe_order_by: dedupe_order_by.filter(|s| !s.is_empty()),
+                transform_sql,
+                transform_rust,
             }))
         }
         other => Err(anyhow!(

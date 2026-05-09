@@ -386,6 +386,8 @@ fn build_sink_config(cfg: &Config) -> Result<SinkConfig> {
         cfg.merge_delete_predicate.clone(),
         cfg.merge_insert_predicate.clone(),
         None,
+        None,
+        None,
     )?;
     Ok(SinkConfig {
         source_uri: cfg.table_uri.clone(),

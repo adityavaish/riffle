@@ -11,5 +11,6 @@ pub mod sample_data;
 pub mod sink;
 pub mod state;
 pub mod tables_inspect;
+pub mod transform_rust;
 pub mod util;
 pub mod web;
