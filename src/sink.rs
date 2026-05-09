@@ -317,20 +317,32 @@ pub async fn apply(
         cfg.target_uri
     );
 
-    let t_open = Instant::now();
-    let target =
-        open_or_create_target(&cfg.target_uri, &cfg.target_storage_options, &schema).await?;
-    tracing::debug!(
-        "[sink] target opened (v{}) in {}ms",
-        version_to_i64(target.version()),
-        t_open.elapsed().as_millis()
-    );
-
     let t_write = Instant::now();
+    let t_open = Instant::now();
     let outcome = match &cfg.mode {
-        SinkMode::Append => apply_append(target, batches, source_rows).await?,
-        SinkMode::Overwrite => apply_overwrite(target, batches, source_rows).await?,
-        SinkMode::Merge(spec) => apply_merge(target, batches, &schema, source_rows, spec).await?,
+        SinkMode::Append => {
+            let target = open_or_create_target(&cfg.target_uri, &cfg.target_storage_options, &schema).await?;
+            tracing::debug!("[sink] target opened (v{}) in {}ms", version_to_i64(target.version()), t_open.elapsed().as_millis());
+            apply_append(target, batches, source_rows).await?
+        }
+        SinkMode::Overwrite => {
+            let target = open_or_create_target(&cfg.target_uri, &cfg.target_storage_options, &schema).await?;
+            tracing::debug!("[sink] target opened (v{}) in {}ms", version_to_i64(target.version()), t_open.elapsed().as_millis());
+            apply_overwrite(target, batches, source_rows).await?
+        }
+        SinkMode::Merge(spec) => {
+            // For merge, defer target open until after the transform so a fresh
+            // target is created with the post-transform schema.
+            apply_merge(
+                &cfg.target_uri,
+                &cfg.target_storage_options,
+                batches,
+                &schema,
+                source_rows,
+                spec,
+            )
+            .await?
+        }
     };
     tracing::debug!(
         "[sink] {} write complete in {}ms (target_version=v{})",
@@ -380,7 +392,8 @@ async fn apply_overwrite(
 }
 
 async fn apply_merge(
-    target: DeltaTable,
+    target_uri: &str,
+    target_storage_options: &HashMap<String, String>,
     batches: Vec<RecordBatch>,
     schema: &ArrowSchemaRef,
     source_rows: u64,
@@ -493,6 +506,16 @@ async fn apply_merge(
         .map(|k| format!("target.\"{0}\" = source.\"{0}\"", k))
         .collect::<Vec<_>>()
         .join(" AND ");
+
+    // Open / create target using the POST-TRANSFORM schema so a fresh
+    // target gets the columns that the user actually produces.
+    let t_open = Instant::now();
+    let target = open_or_create_target(target_uri, target_storage_options, &df_arrow_schema).await?;
+    tracing::debug!(
+        "[sink] target opened (v{}) in {}ms",
+        version_to_i64(target.version()),
+        t_open.elapsed().as_millis()
+    );
 
     let mut merge_op = DeltaOps(target)
         .merge(df, predicate_str.clone())
