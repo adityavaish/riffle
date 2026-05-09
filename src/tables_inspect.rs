@@ -1,11 +1,17 @@
 //! Lightweight Delta-table inspection used by the dashboard "Tables" tab.
 //!
 //! This is read-only: opens the table, returns version, schema, file count,
-//! row-count estimate (sum of stats), and a slice of recent commits.
+//! row-count estimate (sum of stats), a slice of recent commits, and on
+//! request a preview of the first N rows.
 
-use anyhow::{Context, Result};
-use deltalake::open_table_with_storage_options;
+use anyhow::{anyhow, Context, Result};
+use deltalake::datafusion::arrow::record_batch::RecordBatch;
+use deltalake::datafusion::prelude::SessionContext;
+use deltalake::delta_datafusion::{DeltaScanConfigBuilder, DeltaTableProvider};
+use deltalake::{open_table_with_storage_options, DeltaOps};
+use futures::StreamExt;
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::config::{build_storage_options, register_handlers_for, Backend};
 use crate::util::{parse_table_uri, version_to_i64};
@@ -114,5 +120,121 @@ pub async fn inspect(uri: &str, azure_auth: &str) -> Result<InspectResult> {
         schema: cols,
         partition_columns,
         commits,
+    })
+}
+
+#[derive(Serialize)]
+pub struct PreviewResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub returned: usize,
+    pub limit: usize,
+    pub truncated: bool,
+}
+
+/// Read up to `limit` rows from the table, optionally filtered by a SQL WHERE clause.
+/// `where_clause` is the body of the WHERE (e.g. `bool_03 = true AND int64_01 > 0`).
+pub async fn preview(
+    uri: &str,
+    azure_auth: &str,
+    limit: usize,
+    where_clause: Option<&str>,
+) -> Result<PreviewResult> {
+    let backend = Backend::detect(uri);
+    register_handlers_for(&[backend]);
+    std::env::set_var("AZURE_AUTH", azure_auth);
+    let storage_options = build_storage_options(uri, azure_auth)
+        .with_context(|| format!("storage opts for {}", uri))?;
+
+    let table_url = parse_table_uri(uri)?;
+    let table = open_table_with_storage_options(table_url, storage_options.clone())
+        .await
+        .with_context(|| format!("open table {}", uri))?;
+
+    let where_trim = where_clause
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // Be lenient: accept either "col = 1" or "WHERE col = 1".
+            if s.len() >= 5 && s[..5].eq_ignore_ascii_case("WHERE") {
+                s[5..].trim_start()
+            } else {
+                s
+            }
+        })
+        .filter(|s| !s.is_empty());
+    let mut batches: Vec<RecordBatch> = Vec::new();
+
+    if let Some(wc) = where_trim {
+        // Use SessionContext + SQL so we can filter (DataFusion pushes predicates into the scan).
+        let snapshot = table
+            .snapshot()
+            .map_err(|e| anyhow!("snapshot: {}", e))?
+            .snapshot()
+            .clone();
+        let log_store = table.log_store();
+        let config = DeltaScanConfigBuilder::new()
+            .build(&snapshot)
+            .map_err(|e| anyhow!("scan config: {}", e))?;
+        let provider = DeltaTableProvider::try_new(snapshot, log_store, config)
+            .map_err(|e| anyhow!("provider: {}", e))?;
+        let ctx = SessionContext::new();
+        ctx.register_table("t", Arc::new(provider))
+            .map_err(|e| anyhow!("register: {}", e))?;
+        let sql = format!("SELECT * FROM t WHERE {} LIMIT {}", wc, limit);
+        let df = ctx.sql(&sql).await.map_err(|e| anyhow!("sql: {}", e))?;
+        batches = df.collect().await.map_err(|e| anyhow!("collect: {}", e))?;
+    } else {
+        // Fast path: stream the table and stop once we hit `limit` rows.
+        let (_t, mut stream) = DeltaOps(table)
+            .load()
+            .await
+            .map_err(|e| anyhow!("load: {}", e))?;
+        let mut fetched = 0usize;
+        while fetched < limit {
+            match stream.next().await {
+                Some(Ok(b)) => {
+                    fetched += b.num_rows();
+                    batches.push(b);
+                }
+                Some(Err(e)) => return Err(anyhow!("stream: {}", e)),
+                None => break,
+            }
+        }
+    }
+
+    use deltalake::arrow::util::display::{ArrayFormatter, FormatOptions};
+    let opts = FormatOptions::default().with_null("NULL");
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut total = 0usize;
+    for batch in &batches {
+        if columns.is_empty() {
+            columns = batch.schema().fields().iter().map(|f| f.name().clone()).collect();
+        }
+        let formatters: Vec<ArrayFormatter> = batch
+            .columns()
+            .iter()
+            .map(|c| ArrayFormatter::try_new(c.as_ref(), &opts))
+            .collect::<Result<_, _>>()
+            .map_err(|e| anyhow!("formatter: {}", e))?;
+        for r in 0..batch.num_rows() {
+            if total >= limit {
+                break;
+            }
+            let row: Vec<String> = formatters.iter().map(|f| f.value(r).to_string()).collect();
+            rows.push(row);
+            total += 1;
+        }
+        if total >= limit {
+            break;
+        }
+    }
+    Ok(PreviewResult {
+        returned: rows.len(),
+        truncated: rows.len() >= limit,
+        columns,
+        rows,
+        limit,
     })
 }

@@ -51,6 +51,7 @@ pub async fn run(
         .route("/api/create-table/start", post(start_create_table))
         .route("/api/create-table/stop", post(stop_create_table))
         .route("/api/tables/inspect", get(inspect_table))
+        .route("/api/tables/preview", get(preview_table))
         .route("/api/logs", get(logs_stream))
         .route("/api/logs/snapshot", get(logs_snapshot))
         .route("/api/health", get(|| async { "ok" }))
@@ -213,6 +214,33 @@ async fn inspect_table(
             axum::http::StatusCode::BAD_REQUEST,
             format!("{:#}", e),
         )),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PreviewQuery {
+    pub uri: String,
+    #[serde(default = "default_auth")]
+    pub azure_auth: String,
+    #[serde(default = "default_preview_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub r#where: String,
+}
+
+fn default_preview_limit() -> usize { 100 }
+
+async fn preview_table(
+    Query(q): Query<PreviewQuery>,
+) -> Result<axum::Json<tables_inspect::PreviewResult>, (axum::http::StatusCode, String)> {
+    if q.uri.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "uri is required".into()));
+    }
+    let limit = q.limit.clamp(1, 1000);
+    let where_opt = if q.r#where.trim().is_empty() { None } else { Some(q.r#where.as_str()) };
+    match tables_inspect::preview(&q.uri, &q.azure_auth, limit, where_opt).await {
+        Ok(r) => Ok(axum::Json(r)),
+        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, format!("{:#}", e))),
     }
 }
 

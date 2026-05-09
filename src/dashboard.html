@@ -329,43 +329,44 @@
 </section>
 
 <!-- ============================== Tables tab ============================== -->
-<section id="tab-tables" class="tab-panel grid grid-cols-1 lg:grid-cols-12 gap-4" hidden>
+<section id="tab-tables" class="tab-panel space-y-4" hidden>
 
-  <div class="lg:col-span-5 space-y-4">
-    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-5 shadow-sm">
-      <h2 class="text-base font-semibold mb-3">Inspect Delta table</h2>
-      <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Read-only: schema, version, recent commits.</p>
-      <form id="inspectForm" class="space-y-3">
-        <div>
-          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Table URI</label>
-          <input name="uri" required placeholder="abfss://container@acct.dfs.core.windows.net/path/table.delta"
-                 class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
-        </div>
-        <div>
-          <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Azure auth</label>
-          <select name="azure_auth" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
-            <option value="auto">auto</option>
-            <option value="cli">cli</option>
-            <option value="msi">msi</option>
-          </select>
-        </div>
-        <button type="submit" id="inspectBtn" class="w-full font-medium px-4 py-2.5 rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 transition">
-          Inspect
-        </button>
-      </form>
-    </div>
+  <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-4 shadow-sm">
+    <form id="inspectForm" class="flex flex-col md:flex-row md:items-end gap-3">
+      <div class="flex-1 min-w-0">
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Inspect Delta table — URI</label>
+        <input name="uri" required placeholder="abfss://container@acct.dfs.core.windows.net/path/table.delta"
+               class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+      </div>
+      <div class="md:w-32">
+        <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Azure auth</label>
+        <select name="azure_auth" class="mt-1 w-full text-sm px-2 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+          <option value="auto">auto</option>
+          <option value="cli">cli</option>
+          <option value="msi">msi</option>
+        </select>
+      </div>
+      <button type="submit" id="inspectBtn" class="font-medium px-5 py-2 rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 transition">
+        Inspect
+      </button>
+    </form>
   </div>
 
-  <div class="lg:col-span-7 space-y-4">
-    <div id="inspectSummary" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3">
-      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Version</div><div id="insVersion" class="font-semibold text-lg mt-1">—</div></div>
-      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Files</div><div id="insFiles" class="font-semibold text-lg mt-1">—</div></div>
-      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Est. rows</div><div id="insRows" class="font-semibold text-lg mt-1">—</div></div>
-      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Partitioned by</div><div id="insParts" class="font-semibold text-sm mt-1 break-all">—</div></div>
-    </div>
+  <div id="inspectSummary" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3">
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Version</div><div id="insVersion" class="font-semibold text-lg mt-1">—</div></div>
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Files</div><div id="insFiles" class="font-semibold text-lg mt-1">—</div></div>
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Est. rows</div><div id="insRows" class="font-semibold text-lg mt-1">—</div></div>
+    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Partitioned by</div><div id="insParts" class="font-semibold text-sm mt-1 break-all">—</div></div>
+  </div>
 
-    <div id="inspectSchema" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
-      <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800"><h3 class="text-sm font-semibold">Schema</h3></div>
+  <div id="inspectError" class="hidden text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded p-3 font-mono"></div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <details id="inspectSchema" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden group">
+      <summary class="cursor-pointer px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 select-none list-none">
+        <span class="text-xs text-slate-400 group-open:rotate-90 transition-transform">▶</span>
+        <h3 class="text-sm font-semibold">Schema <span id="insSchemaCount" class="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1"></span></h3>
+      </summary>
       <div class="overflow-x-auto max-h-96">
         <table class="w-full text-xs">
           <thead class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 sticky top-0">
@@ -374,21 +375,41 @@
           <tbody id="insSchemaBody"></tbody>
         </table>
       </div>
-    </div>
+    </details>
 
-    <div id="inspectCommits" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
-      <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800"><h3 class="text-sm font-semibold">Recent commits</h3></div>
-      <div class="overflow-x-auto">
+    <details id="inspectCommits" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden group">
+      <summary class="cursor-pointer px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 select-none list-none">
+        <span class="text-xs text-slate-400 group-open:rotate-90 transition-transform">▶</span>
+        <h3 class="text-sm font-semibold">Recent commits <span id="insCommitsCount" class="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1"></span></h3>
+      </summary>
+      <div class="overflow-x-auto max-h-96">
         <table class="w-full text-xs">
-          <thead class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50">
+          <thead class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 sticky top-0">
             <tr><th class="px-3 py-2 text-left">version</th><th class="px-3 py-2 text-left">timestamp</th><th class="px-3 py-2 text-left">operation</th></tr>
           </thead>
           <tbody id="insCommitsBody"></tbody>
         </table>
       </div>
-    </div>
+    </details>
+  </div>
 
-    <div id="inspectError" class="hidden text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded p-3 font-mono"></div>
+  <div id="inspectPreview" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+    <div class="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex flex-col md:flex-row md:items-center gap-2">
+      <h3 class="text-sm font-semibold whitespace-nowrap">Preview <span id="insPreviewMeta" class="text-xs font-normal text-slate-500 dark:text-slate-400 ml-2"></span></h3>
+      <input id="insPreviewWhere" type="text" placeholder="filter (SQL predicate) — e.g. bool_03 = true AND int64_01 > 0"
+             class="flex-1 min-w-0 text-xs font-mono px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+      <div class="flex items-center gap-2 text-xs">
+        <label class="text-slate-500 dark:text-slate-400">rows</label>
+        <input id="insPreviewLimit" type="number" min="1" max="1000" value="100" class="w-20 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+        <button id="insPreviewBtn" type="button" class="px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white disabled:bg-slate-400">Load</button>
+      </div>
+    </div>
+    <div class="overflow-auto max-h-[60vh]">
+      <table class="w-full text-xs font-mono">
+        <thead id="insPreviewHead" class="text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 sticky top-0"></thead>
+        <tbody id="insPreviewBody"></tbody>
+      </table>
+    </div>
   </div>
 </section>
 
@@ -666,6 +687,7 @@ document.getElementById('inspectForm').addEventListener('submit', async (e) => {
     document.getElementById('inspectSummary').classList.add('hidden');
     document.getElementById('inspectSchema').classList.add('hidden');
     document.getElementById('inspectCommits').classList.add('hidden');
+    document.getElementById('inspectPreview').classList.add('hidden');
   } finally {
     btn.disabled = false;
   }
@@ -687,6 +709,7 @@ function renderInspect(d) {
     tbody.appendChild(tr);
   });
   document.getElementById('inspectSchema').classList.remove('hidden');
+  document.getElementById('insSchemaCount').textContent = `(${(d.schema || []).length} cols)`;
 
   const cb = document.getElementById('insCommitsBody');
   cb.innerHTML = '';
@@ -697,7 +720,58 @@ function renderInspect(d) {
     cb.appendChild(tr);
   });
   document.getElementById('inspectCommits').classList.remove('hidden');
+  document.getElementById('insCommitsCount').textContent = `(${(d.commits || []).length})`;
+  // Reveal preview panel; clear stale rows but don't auto-load (user clicks Load).
+  document.getElementById('inspectPreview').classList.remove('hidden');
+  document.getElementById('insPreviewHead').innerHTML = '';
+  document.getElementById('insPreviewBody').innerHTML = '';
+  document.getElementById('insPreviewMeta').textContent = '';
+  document.getElementById('inspectPreview').dataset.uri = d.uri;
 }
+
+async function loadPreview() {
+  const wrap = document.getElementById('inspectPreview');
+  const uri = wrap.dataset.uri;
+  if (!uri) return;
+  const auth = (document.querySelector('#inspectForm [name="azure_auth"]')?.value) || 'auto';
+  const limit = parseInt(document.getElementById('insPreviewLimit').value || '100', 10);
+  const btn = document.getElementById('insPreviewBtn');
+  btn.disabled = true;
+  document.getElementById('insPreviewMeta').textContent = 'loading...';
+  try {
+    const url = new URL('/api/tables/preview', location.origin);
+    url.searchParams.set('uri', uri);
+    url.searchParams.set('azure_auth', auth);
+    url.searchParams.set('limit', String(limit));
+    const wc = document.getElementById('insPreviewWhere').value.trim();
+    if (wc) url.searchParams.set('where', wc);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    const head = document.getElementById('insPreviewHead');
+    head.innerHTML = '<tr>' + data.columns.map(c => `<th class="px-3 py-2 text-left whitespace-nowrap">${escape(c)}</th>`).join('') + '</tr>';
+    const body = document.getElementById('insPreviewBody');
+    body.innerHTML = data.rows.map(row =>
+      '<tr class="border-t border-slate-100 dark:border-slate-800">' +
+      row.map(v => `<td class="px-3 py-1 whitespace-nowrap text-slate-700 dark:text-slate-300">${escape(v)}</td>`).join('') +
+      '</tr>'
+    ).join('');
+    document.getElementById('insPreviewMeta').textContent =
+      `${data.returned} row(s)${data.truncated ? ' (truncated to ' + data.limit + ')' : ''}`;
+  } catch (err) {
+    document.getElementById('insPreviewMeta').textContent = '';
+    toast('Preview failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById('insPreviewBtn').addEventListener('click', loadPreview);
+document.getElementById('insPreviewLimit').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); loadPreview(); }
+});
+document.getElementById('insPreviewWhere').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); loadPreview(); }
+});
 function escape(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // ---------- state SSE ----------
