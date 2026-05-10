@@ -85,11 +85,69 @@
       </div>
 
       <form id="streamForm" class="space-y-3">
-        <div>
+        <div class="flex gap-1 p-1 rounded-md bg-slate-100 dark:bg-slate-800 text-sm">
+          <label class="flex-1 cursor-pointer">
+            <input type="radio" name="source_kind" value="delta" class="peer sr-only" checked />
+            <div class="text-center px-3 py-1.5 rounded peer-checked:bg-white peer-checked:dark:bg-slate-700 peer-checked:font-medium peer-checked:shadow-sm text-slate-600 dark:text-slate-300 peer-checked:text-slate-900 peer-checked:dark:text-white">Delta source</div>
+          </label>
+          <label class="flex-1 cursor-pointer">
+            <input type="radio" name="source_kind" value="eventhub" class="peer sr-only" />
+            <div class="text-center px-3 py-1.5 rounded peer-checked:bg-white peer-checked:dark:bg-slate-700 peer-checked:font-medium peer-checked:shadow-sm text-slate-600 dark:text-slate-300 peer-checked:text-slate-900 peer-checked:dark:text-white">Event Hub source</div>
+          </label>
+        </div>
+
+        <div data-src="delta">
           <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Source URI</label>
-          <input name="source_uri" required placeholder="abfss://container@acct.dfs.core.windows.net/path/source.delta"
+          <input name="source_uri" placeholder="abfss://container@acct.dfs.core.windows.net/path/source.delta"
                  class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
         </div>
+
+        <div data-src="eventhub" class="hidden space-y-3">
+          <div>
+            <label class="text-xs font-medium text-slate-600 dark:text-slate-400">EH namespace (FQDN)</label>
+            <input name="eh_namespace" placeholder="myns.servicebus.windows.net"
+                   class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Event Hub name</label>
+              <input name="eh_event_hub" placeholder="my-hub"
+                     class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Consumer group</label>
+              <input name="eh_consumer_group" value="$Default"
+                     class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Initial position</label>
+              <select name="eh_initial_position" class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950">
+                <option value="latest">latest (skip backlog)</option>
+                <option value="earliest">earliest (replay all)</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400" title="Empty = all partitions">Partitions (comma-sep)</label>
+              <input name="eh_partitions" placeholder="(all)"
+                     class="mt-1 w-full text-sm font-mono px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Max events/batch</label>
+              <input name="eh_max_events_per_batch" type="number" value="5000" min="1"
+                     class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Batch timeout (s)</label>
+              <input name="eh_batch_timeout_secs" type="number" value="5" min="1"
+                     class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
+          </div>
+        </div>
+
         <div>
           <label class="text-xs font-medium text-slate-600 dark:text-slate-400">Target URI</label>
           <input name="target_uri" required placeholder="abfss://.../target.delta"
@@ -166,14 +224,14 @@ Ok(batch)" class="w-full text-xs font-mono px-2 py-2 rounded border border-slate
         <details class="rounded-md bg-slate-50 dark:bg-slate-800/50 p-3 text-sm">
           <summary class="cursor-pointer font-medium text-slate-700 dark:text-slate-300">Advanced</summary>
           <div class="grid grid-cols-2 gap-3 mt-3">
-            <div><label class="text-xs text-slate-600 dark:text-slate-400">Start version</label><input name="start_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <div><label class="text-xs text-slate-600 dark:text-slate-400">End version</label><input name="end_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <div><label class="text-xs text-slate-600 dark:text-slate-400">Poll interval (s)</label><input name="poll_interval_secs" type="number" value="5" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <div><label class="text-xs text-slate-600 dark:text-slate-400">Max versions/batch</label><input name="max_versions_per_batch" type="number" value="10" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <div><label class="text-xs text-slate-600 dark:text-slate-400" title="Soft cap on source rows per batch (estimated from add-action stats). 0 disables.">Max input rows/batch</label><input name="max_input_rows_per_batch" type="number" value="0" min="0" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <div><label class="text-xs text-slate-600 dark:text-slate-400">Read concurrency</label><input name="read_concurrency" type="number" value="8" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <div><label class="text-xs text-slate-600 dark:text-slate-400">Checkpoint file</label><input name="checkpoint_file" value="./riffle-stream-ckpt.json" class="mt-1 w-full text-sm font-mono px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
-            <label class="col-span-2 inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300"><input type="checkbox" name="once" /> Run once (don't poll for new versions)</label>
+            <div data-src="delta"><label class="text-xs text-slate-600 dark:text-slate-400">Start version</label><input name="start_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div data-src="delta"><label class="text-xs text-slate-600 dark:text-slate-400">End version</label><input name="end_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div data-src="delta"><label class="text-xs text-slate-600 dark:text-slate-400">Poll interval (s)</label><input name="poll_interval_secs" type="number" value="5" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div data-src="delta"><label class="text-xs text-slate-600 dark:text-slate-400">Max versions/batch</label><input name="max_versions_per_batch" type="number" value="10" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div data-src="delta"><label class="text-xs text-slate-600 dark:text-slate-400" title="Soft cap on source rows per batch (estimated from add-action stats). 0 disables.">Max input rows/batch</label><input name="max_input_rows_per_batch" type="number" value="0" min="0" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div data-src="delta"><label class="text-xs text-slate-600 dark:text-slate-400">Read concurrency</label><input name="read_concurrency" type="number" value="8" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div class="col-span-2"><label class="text-xs text-slate-600 dark:text-slate-400">Checkpoint file</label><input name="checkpoint_file" value="./riffle-stream-ckpt.json" class="mt-1 w-full text-sm font-mono px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <label class="col-span-2 inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300"><input type="checkbox" name="once" /> Run once (don't poll for new events)</label>
           </div>
         </details>
 
@@ -597,7 +655,19 @@ function buildCli(tab) {
   if (tab === 'stream') {
     const o = formObject(document.getElementById('streamForm'));
     const parts = ['riffle stream'];
-    if (o.source_uri) parts.push(`--source-uri "${o.source_uri}"`);
+    const isEh = (o.source_kind || 'delta') === 'eventhub';
+    if (isEh) {
+      parts.push(`--source-kind eventhub`);
+      if (o.eh_namespace) parts.push(`--eh-namespace ${o.eh_namespace}`);
+      if (o.eh_event_hub) parts.push(`--eh-event-hub ${o.eh_event_hub}`);
+      if (o.eh_consumer_group) parts.push(`--eh-consumer-group '${o.eh_consumer_group}'`);
+      if (o.eh_initial_position) parts.push(`--eh-initial-position ${o.eh_initial_position}`);
+      if (o.eh_partitions) parts.push(`--eh-partitions "${o.eh_partitions}"`);
+      if (o.eh_max_events_per_batch) parts.push(`--eh-max-events-per-batch ${o.eh_max_events_per_batch}`);
+      if (o.eh_batch_timeout_secs) parts.push(`--eh-batch-timeout-secs ${o.eh_batch_timeout_secs}`);
+    } else if (o.source_uri) {
+      parts.push(`--source-uri "${o.source_uri}"`);
+    }
     if (o.target_uri) parts.push(`--target-uri "${o.target_uri}"`);
     if (o.sink_mode) parts.push(`--sink-mode ${o.sink_mode}`);
     if (o.merge_keys) parts.push(`--merge-keys "${o.merge_keys}"`);
@@ -610,12 +680,14 @@ function buildCli(tab) {
       const esc = String(o.merge_transform_sql).replace(/"/g, '\\"');
       parts.push(`--merge-transform-sql "${esc}"`);
     }
-    if (o.start_version) parts.push(`--start-version ${o.start_version}`);
-    if (o.end_version) parts.push(`--end-version ${o.end_version}`);
-    if (o.poll_interval_secs) parts.push(`--poll-interval-secs ${o.poll_interval_secs}`);
-    if (o.max_versions_per_batch) parts.push(`--max-versions-per-batch ${o.max_versions_per_batch}`);
-    if (o.max_input_rows_per_batch && Number(o.max_input_rows_per_batch) > 0) parts.push(`--max-input-rows-per-batch ${o.max_input_rows_per_batch}`);
-    if (o.read_concurrency) parts.push(`--read-concurrency ${o.read_concurrency}`);
+    if (!isEh) {
+      if (o.start_version) parts.push(`--start-version ${o.start_version}`);
+      if (o.end_version) parts.push(`--end-version ${o.end_version}`);
+      if (o.poll_interval_secs) parts.push(`--poll-interval-secs ${o.poll_interval_secs}`);
+      if (o.max_versions_per_batch) parts.push(`--max-versions-per-batch ${o.max_versions_per_batch}`);
+      if (o.max_input_rows_per_batch && Number(o.max_input_rows_per_batch) > 0) parts.push(`--max-input-rows-per-batch ${o.max_input_rows_per_batch}`);
+      if (o.read_concurrency) parts.push(`--read-concurrency ${o.read_concurrency}`);
+    }
     if (o.azure_auth) parts.push(`--azure-auth ${o.azure_auth}`);
     if (o.checkpoint_file) parts.push(`--checkpoint-file "${o.checkpoint_file}"`);
     if (o.once) parts.push(`--once`);
@@ -664,6 +736,22 @@ function syncTransformPanels() {
 }
 streamForm.querySelectorAll('input[name="transform_kind"]').forEach(r => r.addEventListener('change', syncTransformPanels));
 syncTransformPanels();
+
+// Source kind toggle (Delta vs Event Hub).
+function syncSourcePanels() {
+  const sel = streamForm.querySelector('input[name="source_kind"]:checked')?.value || 'delta';
+  streamForm.querySelectorAll('[data-src]').forEach(p => {
+    p.classList.toggle('hidden', p.dataset.src !== sel);
+  });
+  // The required attribute lives only on the Delta source URI; toggle it.
+  const srcUri = streamForm.querySelector('input[name="source_uri"]');
+  if (srcUri) {
+    if (sel === 'delta') srcUri.setAttribute('required', '');
+    else srcUri.removeAttribute('required');
+  }
+}
+streamForm.querySelectorAll('input[name="source_kind"]').forEach(r => r.addEventListener('change', syncSourcePanels));
+syncSourcePanels();
 
 // Rust transform Validate button.
 const rustValidateBtn = document.getElementById('rustValidateBtn');
@@ -726,11 +814,22 @@ streamForm.addEventListener('submit', async (e) => {
     return;
   }
   const o = formObject(streamForm);
-  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'max_input_rows_per_batch', 'read_concurrency'], ['once']);
+  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'max_input_rows_per_batch', 'read_concurrency', 'eh_max_events_per_batch', 'eh_batch_timeout_secs'], ['once']);
   // Strip the inactive transform field so the server only sees the selected one.
   if (o.transform_kind !== 'sql') delete o.merge_transform_sql;
   if (o.transform_kind !== 'rust') delete o.merge_transform_rust;
   delete o.transform_kind;
+  // Strip irrelevant source-kind-specific fields.
+  if (o.source_kind === 'eventhub') {
+    delete o.source_uri;
+    delete o.start_version; delete o.end_version;
+    delete o.poll_interval_secs; delete o.max_versions_per_batch;
+    delete o.max_input_rows_per_batch; delete o.read_concurrency;
+  } else {
+    delete o.eh_namespace; delete o.eh_event_hub; delete o.eh_consumer_group;
+    delete o.eh_initial_position; delete o.eh_max_events_per_batch;
+    delete o.eh_batch_timeout_secs; delete o.eh_partitions;
+  }
   streamRunBtn.disabled = true;
   try {
     const r = await fetch('/api/sink/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
