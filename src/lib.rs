@@ -2,6 +2,7 @@
 
 pub mod cli_create;
 pub mod cli_demo;
+pub mod cli_enable_cdf;
 pub mod cli_stream;
 pub mod config;
 pub mod consumer;

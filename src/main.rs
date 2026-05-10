@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use riffle::cli_create::{self, CreateTableArgs};
 use riffle::cli_demo;
+use riffle::cli_enable_cdf::{self, EnableCdfArgs};
 use riffle::cli_stream::{self, StreamArgs};
 use riffle::config::Config;
 
@@ -27,6 +28,9 @@ enum Cmd {
     /// Create a small Delta table with N commits of synthetic data (useful for
     /// iterating on stream/merge performance against a controlled source).
     CreateTable(CreateTableArgs),
+    /// Enable Delta Change Data Feed (`delta.enableChangeDataFeed=true`) on an
+    /// existing table. Only future commits will be replayable as a change feed.
+    EnableCdf(EnableCdfArgs),
     /// Synthetic CDC producer + adaptive consumer demo with live web dashboard.
     Demo(Config),
 }
@@ -52,6 +56,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Cmd::Stream(args) => cli_stream::run(args).await,
         Cmd::CreateTable(args) => cli_create::run(args).await,
+        Cmd::EnableCdf(args) => cli_enable_cdf::run(args).await,
         Cmd::Demo(cfg) => cli_demo::run(cfg).await,
     }
 }
