@@ -36,6 +36,7 @@ base64 = "0.22"
 azure_messaging_eventhubs = "0.14"
 azure_identity = "0.35"
 azure_core = "0.30"
+datafusion-functions-json = "0.53"
 
 [[bin]]
 name = "riffle"

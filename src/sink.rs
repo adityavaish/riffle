@@ -490,7 +490,11 @@ async fn apply_merge(
         return Err(anyhow!("merge mode requires at least one key column"));
     }
 
-    let ctx = SessionContext::new();
+    let mut state = deltalake::datafusion::execution::context::SessionContext::new().state();
+    if let Err(e) = datafusion_functions_json::register_all(&mut state) {
+        tracing::warn!("[sink] register JSON UDFs failed: {}", e);
+    }
+    let ctx = SessionContext::new_with_state(state);
     let df = ctx
         .read_batches(batches)
         .map_err(|e: DataFusionError| anyhow!("read_batches failed: {}", e))?;
