@@ -47,7 +47,14 @@ pub async fn run(state: SharedState, cfg: Config) -> Result<()> {
                 storage_options.clone(),
             )
             .await?;
-            let result = ops.write(vec![batch]).with_save_mode(SaveMode::Overwrite).await?;
+            let result = ops
+                .write(vec![batch])
+                .with_save_mode(SaveMode::Overwrite)
+                .with_configuration([(
+                    "delta.enableChangeDataFeed".to_string(),
+                    Some("true".to_string()),
+                )])
+                .await?;
             version_to_i64(result.version())
         } else {
             let table_url = parse_table_uri(&cfg.table_uri)?;

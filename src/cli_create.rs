@@ -260,7 +260,14 @@ pub async fn run_inner(
             )
             .await
             .with_context(|| format!("open/create target {}", cfg.uri))?;
-            let res = ops.write(vec![batch]).with_save_mode(mode).await?;
+            let res = ops
+                .write(vec![batch])
+                .with_save_mode(mode)
+                .with_configuration([(
+                    "delta.enableChangeDataFeed".to_string(),
+                    Some("true".to_string()),
+                )])
+                .await?;
             version_to_i64(res.version())
         } else {
             let table_url = parse_table_uri(&cfg.uri)?;

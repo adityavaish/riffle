@@ -1,37 +1,56 @@
 //! Generic Delta-to-Delta sink.
 //!
-//! Reads newly-added rows from a source Delta table (by version) and transfers them
-//! into a target Delta table using one of three semantics:
+//! Reads change rows from a source Delta table (via Delta Change Data Feed)
+//! and transfers them into a target Delta table using one of three semantics:
 //!
-//! - **Append**    — `DeltaOps(target).write(...).with_save_mode(Append)`
+//! - **Append**    — `DeltaOps(target).write(...).with_save_mode(Append)` of post-images.
 //! - **Overwrite** — same with `SaveMode::Overwrite` (full replace per batch).
 //! - **Merge**     — `DeltaOps(target).merge(...)` keyed by user-specified columns,
-//!                   with optional SQL predicates for matched-update / matched-delete /
-//!                   not-matched-insert clauses. Predicate strings are parsed by
-//!                   delta-rs against the merged `source ∪ target` schema.
+//!                   with `_change_type='delete'` rows automatically routed to
+//!                   `WHEN MATCHED THEN DELETE`. User predicates for matched-update /
+//!                   matched-delete / not-matched-insert are still honoured.
+//!
+//! Riffle requires the source table to have `delta.enableChangeDataFeed=true`.
+//! `update_preimage` rows are dropped on read (they describe pre-update state and
+//! are never useful for a downstream materialized view). `_change_type`,
+//! `_commit_version`, and `_commit_timestamp` columns are exposed to user-supplied
+//! transforms via the `__src` view so SQL like `WHERE _change_type='insert'` works.
 //!
 //! Reading source rows uses the source table's already-authenticated `ObjectStore`,
 //! so cloud credentials configured for the source apply transparently.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use deltalake::datafusion::common::DataFusionError;
+use deltalake::datafusion::datasource::TableProvider;
 use deltalake::datafusion::execution::context::SessionContext;
 use deltalake::datafusion::logical_expr::col;
+use deltalake::delta_datafusion::cdf::scan::DeltaCdfTableProvider;
 use deltalake::operations::create::CreateBuilder;
 use deltalake::operations::merge::MergeMetrics;
 use deltalake::protocol::SaveMode;
-use deltalake::{open_table_with_storage_options, DeltaOps, DeltaTable, ObjectStore};
-use futures::stream::{StreamExt, TryStreamExt};
-use object_store::path::Path as ObjectStorePath;
-use object_store::ObjectStoreExt;
-use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use deltalake::table::config::TablePropertiesExt;
+use deltalake::{open_table_with_storage_options, DeltaOps, DeltaTable};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::util::{parse_table_uri, version_to_i64};
+
+/// CDF metadata columns appended by `scan_cdf`. These are stripped from the
+/// data we write/merge into the target, but `_change_type` is kept available
+/// in the `__src` view so user transforms can reference it.
+const CDF_CHANGE_TYPE_COL: &str = "_change_type";
+const CDF_COMMIT_VERSION_COL: &str = "_commit_version";
+const CDF_COMMIT_TIMESTAMP_COL: &str = "_commit_timestamp";
+
+fn is_cdf_metadata_col(name: &str) -> bool {
+    matches!(
+        name,
+        CDF_CHANGE_TYPE_COL | CDF_COMMIT_VERSION_COL | CDF_COMMIT_TIMESTAMP_COL
+    )
+}
 
 #[derive(Debug, Clone)]
 pub enum SinkMode {
@@ -102,137 +121,133 @@ pub struct SinkOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// Read newly-added rows from source commits
+// Read change rows from source via Delta CDF
 // ---------------------------------------------------------------------------
 
-async fn read_added_paths(table: &DeltaTable, version: i64) -> Result<Vec<String>> {
-    use deltalake::logstore::commit_uri_from_version;
-
-    let log_store = table.log_store();
-    let commit_path = commit_uri_from_version(Some(version as u64));
-    let bytes = log_store
-        .object_store(None)
-        .get(&commit_path)
-        .await?
-        .bytes()
-        .await?;
-    let s = std::str::from_utf8(&bytes)?;
-
-    let mut out = Vec::new();
-    for line in s.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let action: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(add) = action.get("add") {
-            if let Some(path) = add.get("path").and_then(|p| p.as_str()) {
-                out.push(path.to_string());
-            }
-        }
-    }
-    Ok(out)
-}
-
-async fn read_parquet_file(
-    object_store: Arc<dyn ObjectStore>,
-    rel_path: &str,
-) -> Result<Vec<RecordBatch>> {
-    let path = ObjectStorePath::from_url_path(rel_path)
-        .or_else(|_| Ok::<_, object_store::path::Error>(ObjectStorePath::from(rel_path)))?;
-    let meta = object_store
-        .head(&path)
-        .await
-        .with_context(|| format!("HEAD failed for {}", rel_path))?;
-
-    let reader = ParquetObjectReader::new(object_store, path).with_file_size(meta.size);
-    let stream = ParquetRecordBatchStreamBuilder::new(reader)
-        .await?
-        .build()?;
-    let batches = stream.try_collect::<Vec<_>>().await?;
-    Ok(batches)
-}
-
-/// Read every parquet file added by the given source versions.
+/// Read change rows from `[start_version..=end_version]` of `source` via Delta
+/// Change Data Feed.
 ///
-/// `read_concurrency` controls how many parquet files are fetched in parallel
-/// (clamped to `[1, all_paths.len()]`).
-pub async fn read_added_rows(
+/// - Pre-flight requires `delta.enableChangeDataFeed=true` on the source.
+/// - `update_preimage` rows are dropped (they describe pre-update state).
+/// - The returned schema includes all source data columns plus the CDF columns
+///   `_change_type`, `_commit_version`, `_commit_timestamp` (in that order at
+///   the end). Downstream callers strip them before writing as needed.
+pub async fn read_cdf_rows(
     source: &DeltaTable,
-    versions: &[i64],
-    read_concurrency: usize,
+    start_version: i64,
+    end_version: i64,
+    _read_concurrency: usize,
 ) -> Result<(Vec<RecordBatch>, ArrowSchemaRef, u64)> {
-    let object_store = source.log_store().object_store(None);
-    let mut all_paths: Vec<String> = Vec::new();
-    let t_paths = Instant::now();
-    for v in versions {
-        let mut p = read_added_paths(source, *v).await?;
-        tracing::debug!("[sink] v{} contributes {} added file(s)", v, p.len());
-        all_paths.append(&mut p);
+    let snap = source
+        .snapshot()
+        .map_err(|e| anyhow!("read source snapshot: {}", e))?;
+    if !snap.table_config().enable_change_data_feed() {
+        return Err(anyhow!(
+            "source table does not have delta.enableChangeDataFeed=true. \
+             Riffle reads exclusively via Delta Change Data Feed. \
+             Recreate the source table with CDF enabled, or run `ALTER TABLE ... \
+             SET TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')`. Note that \
+             ALTER only enables CDF for FUTURE commits — existing versions will not \
+             be replayable as a change feed."
+        ));
     }
-    let total_files = all_paths.len();
-    tracing::info!(
-        "[sink] discovered {} added file(s) across {} version(s) in {}ms",
-        total_files,
-        versions.len(),
-        t_paths.elapsed().as_millis()
-    );
 
-    let concurrency = read_concurrency.max(1).min(total_files.max(1));
-    tracing::info!(
-        "[sink] reading {} file(s) with concurrency={}",
-        total_files,
-        concurrency
-    );
-
-    // Fan out file reads in parallel while preserving completion ordering for logs.
-    let store = object_store.clone();
-    let read_results: Vec<(usize, String, Vec<RecordBatch>, u64, u128)> =
-        futures::stream::iter(all_paths.into_iter().enumerate())
-            .map(|(idx, path)| {
-                let store = store.clone();
-                async move {
-                    let t_file = Instant::now();
-                    let batches = read_parquet_file(store, &path).await?;
-                    let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
-                    Ok::<_, anyhow::Error>((idx, path, batches, rows, t_file.elapsed().as_millis()))
-                }
-            })
-            .buffer_unordered(concurrency)
-            .try_collect()
-            .await?;
-
-    let mut all_batches: Vec<RecordBatch> = Vec::new();
-    let mut schema: Option<ArrowSchemaRef> = None;
-    let mut total_rows: u64 = 0;
-    for (idx, path, batches, rows, ms) in read_results {
-        for b in batches {
-            if schema.is_none() {
-                schema = Some(b.schema());
-            }
-            all_batches.push(b);
-        }
-        total_rows += rows;
-        tracing::debug!(
-            "[sink] read file {}/{} ({}) -> {} rows in {}ms",
-            idx + 1,
-            total_files,
-            path,
-            rows,
-            ms
-        );
+    if end_version < start_version {
+        return Err(anyhow!(
+            "read_cdf_rows: end_version v{} < start_version v{}",
+            end_version,
+            start_version
+        ));
     }
+
+    let t0 = Instant::now();
+    let builder = source
+        .clone()
+        .scan_cdf()
+        .with_starting_version(start_version as u64)
+        .with_ending_version(end_version as u64);
+    let provider = DeltaCdfTableProvider::try_new(builder)
+        .map_err(|e| anyhow!("build CDF provider: {}", e))?;
+    let provider_schema = provider.schema();
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_table(Arc::new(provider))
+        .map_err(|e: DataFusionError| anyhow!("read CDF table: {}", e))?;
+    let raw_batches = df
+        .collect()
+        .await
+        .map_err(|e: DataFusionError| anyhow!("collect CDF batches: {}", e))?;
+    let raw_rows: u64 = raw_batches.iter().map(|b| b.num_rows() as u64).sum();
     tracing::info!(
-        "[sink] read total {} row(s) from {} file(s)",
-        total_rows,
-        total_files
+        "[sink] read CDF v{}..=v{}: {} batch(es), {} row(s) (incl. preimages) in {}ms",
+        start_version,
+        end_version,
+        raw_batches.len(),
+        raw_rows,
+        t0.elapsed().as_millis()
     );
 
-    let schema = schema.ok_or_else(|| anyhow!("no rows added in versions {:?}", versions))?;
-    Ok((all_batches, schema, total_rows))
+    if raw_batches.is_empty() {
+        return Ok((Vec::new(), provider_schema, 0));
+    }
+
+    // Drop update_preimage rows. They describe values BEFORE an update and are
+    // never useful for a downstream materialized state — keeping them would
+    // either double-count or fight the post-image in the merge.
+    let ctx2 = SessionContext::new();
+    let df = ctx2
+        .read_batches(raw_batches)
+        .map_err(|e: DataFusionError| anyhow!("read_batches for preimage filter: {}", e))?;
+    ctx2.register_table("__cdf_raw", df.into_view())
+        .map_err(|e: DataFusionError| anyhow!("register __cdf_raw: {}", e))?;
+    let df = ctx2
+        .sql(
+            "SELECT * FROM __cdf_raw WHERE \"_change_type\" IS NULL OR \"_change_type\" <> 'update_preimage'",
+        )
+        .await
+        .map_err(|e: DataFusionError| anyhow!("preimage filter sql: {}", e))?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e: DataFusionError| anyhow!("collect after preimage filter: {}", e))?;
+    let post_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+    tracing::info!(
+        "[sink] after dropping update_preimage: {} row(s) ({} dropped)",
+        post_rows,
+        raw_rows.saturating_sub(post_rows)
+    );
+
+    let schema = batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or(provider_schema);
+    Ok((batches, schema, post_rows))
+}
+
+/// Drop CDF metadata columns (`_change_type`, `_commit_version`,
+/// `_commit_timestamp`) from a dataframe via SQL projection. Used for
+/// append/overwrite paths where the target schema is data-only.
+async fn drop_cdf_cols(
+    ctx: &SessionContext,
+    df: deltalake::datafusion::dataframe::DataFrame,
+) -> Result<deltalake::datafusion::dataframe::DataFrame> {
+    let arrow_schema = df.schema().as_arrow().clone();
+    let cols: Vec<String> = arrow_schema
+        .fields()
+        .iter()
+        .filter(|f| !is_cdf_metadata_col(f.name()))
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect();
+    let view = "__riffle_cdf_strip";
+    let _ = ctx.deregister_table(view);
+    ctx.register_table(view, df.into_view())
+        .map_err(|e: DataFusionError| anyhow!("register {}: {}", view, e))?;
+    let sql = format!("SELECT {} FROM {}", cols.join(", "), view);
+    let df = ctx
+        .sql(&sql)
+        .await
+        .map_err(|e: DataFusionError| anyhow!("strip CDF cols sql failed: {}", e))?;
+    Ok(df)
 }
 
 // ---------------------------------------------------------------------------
@@ -248,10 +263,11 @@ async fn open_or_create_target(
     match open_table_with_storage_options(target_url, storage_opts.clone()).await {
         Ok(t) => Ok(t),
         Err(_) => {
-            tracing::info!("[sink] target table not found at {}; creating", target_uri);
+            tracing::info!("[sink] target table not found at {}; creating with CDF enabled", target_uri);
             let struct_fields: Vec<deltalake::kernel::StructField> = source_schema
                 .fields()
                 .iter()
+                .filter(|f| !is_cdf_metadata_col(f.name()))
                 .map(|f| {
                     use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
                     let dt: deltalake::kernel::DataType =
@@ -273,6 +289,10 @@ async fn open_or_create_target(
                 .with_columns(struct_fields)
                 .with_save_mode(SaveMode::ErrorIfExists)
                 .with_table_name("riffle_sink_target")
+                .with_configuration([(
+                    "delta.enableChangeDataFeed".to_string(),
+                    Some("true".to_string()),
+                )])
                 .await?;
             Ok(table)
         }
@@ -287,7 +307,7 @@ async fn open_or_create_target(
 ///
 /// `source` should already be opened and reflect the latest visible state of the
 /// source table (caller is expected to refresh/poll). Versions are read from the
-/// source via its ObjectStore.
+/// source via Delta Change Data Feed (`delta.enableChangeDataFeed=true` required).
 pub async fn apply(
     cfg: &SinkConfig,
     source: &DeltaTable,
@@ -301,10 +321,20 @@ pub async fn apply(
         cfg.target_uri
     );
 
+    if versions.is_empty() {
+        return Ok(SinkOutcome {
+            duration_ms: t0.elapsed().as_millis() as u64,
+            ..Default::default()
+        });
+    }
+    let v_start = *versions.first().unwrap();
+    let v_end = *versions.last().unwrap();
+
     let concurrency = if cfg.read_concurrency == 0 { 8 } else { cfg.read_concurrency };
-    let (batches, schema, source_rows) = read_added_rows(source, versions, concurrency).await?;
+    let (batches, schema, source_rows) =
+        read_cdf_rows(source, v_start, v_end, concurrency).await?;
     if batches.is_empty() {
-        tracing::info!("[sink] no batches to apply (empty source contributions)");
+        tracing::info!("[sink] no change rows to apply (empty CDF for v{}..=v{})", v_start, v_end);
         return Ok(SinkOutcome {
             duration_ms: t0.elapsed().as_millis() as u64,
             ..Default::default()
@@ -362,13 +392,33 @@ async fn apply_append(
     batches: Vec<RecordBatch>,
     source_rows: u64,
 ) -> Result<SinkOutcome> {
+    // Strip CDF metadata cols + drop delete tombstones so append only writes
+    // post-image data rows.
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_batches(batches)
+        .map_err(|e: DataFusionError| anyhow!("read_batches: {}", e))?;
+    ctx.register_table("__cdf", df.into_view())
+        .map_err(|e: DataFusionError| anyhow!("register __cdf: {}", e))?;
+    let df = ctx
+        .sql(
+            "SELECT * FROM __cdf WHERE \"_change_type\" IS NULL OR \"_change_type\" <> 'delete'",
+        )
+        .await
+        .map_err(|e: DataFusionError| anyhow!("filter deletes for append: {}", e))?;
+    let df = drop_cdf_cols(&ctx, df).await?;
+    let out_batches = df
+        .collect()
+        .await
+        .map_err(|e: DataFusionError| anyhow!("collect for append: {}", e))?;
+    let appended: u64 = out_batches.iter().map(|b| b.num_rows() as u64).sum();
     let merged = DeltaOps(target)
-        .write(batches)
+        .write(out_batches)
         .with_save_mode(SaveMode::Append)
         .await?;
     Ok(SinkOutcome {
         source_rows,
-        appended: source_rows,
+        appended,
         target_version: version_to_i64(merged.version()),
         ..Default::default()
     })
@@ -379,13 +429,31 @@ async fn apply_overwrite(
     batches: Vec<RecordBatch>,
     source_rows: u64,
 ) -> Result<SinkOutcome> {
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_batches(batches)
+        .map_err(|e: DataFusionError| anyhow!("read_batches: {}", e))?;
+    ctx.register_table("__cdf", df.into_view())
+        .map_err(|e: DataFusionError| anyhow!("register __cdf: {}", e))?;
+    let df = ctx
+        .sql(
+            "SELECT * FROM __cdf WHERE \"_change_type\" IS NULL OR \"_change_type\" <> 'delete'",
+        )
+        .await
+        .map_err(|e: DataFusionError| anyhow!("filter deletes for overwrite: {}", e))?;
+    let df = drop_cdf_cols(&ctx, df).await?;
+    let out_batches = df
+        .collect()
+        .await
+        .map_err(|e: DataFusionError| anyhow!("collect for overwrite: {}", e))?;
+    let appended: u64 = out_batches.iter().map(|b| b.num_rows() as u64).sum();
     let merged = DeltaOps(target)
-        .write(batches)
+        .write(out_batches)
         .with_save_mode(SaveMode::Overwrite)
         .await?;
     Ok(SinkOutcome {
         source_rows,
-        appended: source_rows,
+        appended,
         target_version: version_to_i64(merged.version()),
         ..Default::default()
     })
@@ -409,8 +477,9 @@ async fn apply_merge(
         .map_err(|e: DataFusionError| anyhow!("read_batches failed: {}", e))?;
 
     // Source-side dedup on merge keys to avoid the "MERGE matched a target row with multiple
-    // source rows" error. Use ROW_NUMBER() OVER (PARTITION BY keys ORDER BY <order_col DESC | NULL>)
-    // and keep rn = 1.
+    // source rows" error. Use ROW_NUMBER() OVER (PARTITION BY keys ORDER BY <order_col DESC>)
+    // and keep rn = 1. With CDF, the natural order is `_commit_version DESC` so the most
+    // recent change per key wins (e.g. an `insert` followed by `delete` becomes just `delete`).
     let df = {
         let view_name = "__riffle_merge_src";
         ctx.register_table(view_name, df.into_view())
@@ -423,7 +492,7 @@ async fn apply_merge(
             .join(", ");
         let order_by = match &spec.dedupe_order_by {
             Some(c) if !c.is_empty() => format!("\"{}\" DESC", c),
-            _ => format!("\"{}\"", spec.keys[0]),
+            _ => "\"_commit_version\" DESC".to_string(),
         };
         let cols = schema
             .fields()
@@ -449,7 +518,7 @@ async fn apply_merge(
             .map_err(|e: DataFusionError| anyhow!("collect for rust transform: {}", e))?;
         let mut out_batches = Vec::with_capacity(in_batches.len());
         for b in &in_batches {
-            let nb = rust_lib.apply(b).context("rust transform apply")?;
+            let nb = rust_lib.apply(b).map_err(|e| anyhow!("rust transform apply: {:#}", e))?;
             out_batches.push(nb);
         }
         ctx.read_batches(out_batches)
@@ -459,9 +528,11 @@ async fn apply_merge(
     };
 
     // Optional user SQL transform: run it against the dedup'd source as `__src`.
+    // The view exposes the CDF columns (`_change_type`, `_commit_version`,
+    // `_commit_timestamp`) so users can filter on them, e.g.
+    //   SELECT id, name FROM __src WHERE _change_type IN ('insert','update_postimage')
     let df = if let Some(user_sql) = spec.transform_sql.as_deref().filter(|s| !s.trim().is_empty()) {
         let view = "__src";
-        // Drop a previous registration if any (from an earlier batch in the same loop iteration).
         let _ = ctx.deregister_table(view);
         ctx.register_table(view, df.into_view())
             .map_err(|e: DataFusionError| anyhow!("register __src failed: {}", e))?;
@@ -473,8 +544,11 @@ async fn apply_merge(
         df
     };
 
-    // Determine which columns are updated by WHEN MATCHED UPDATE. Use the (possibly-transformed)
+    // Determine which columns are updated/inserted. Use the (possibly-transformed)
     // dataframe's schema so transforms that rename/drop columns are honoured.
+    // CDF metadata columns are excluded from the data we project into the target
+    // (target only stores user data); `_change_type` is kept available for clause
+    // predicates but never written.
     let key_set: std::collections::HashSet<&str> = spec.keys.iter().map(|s| s.as_str()).collect();
     let df_arrow_schema: ArrowSchemaRef = Arc::new(df.schema().as_arrow().clone());
     let all_cols: Vec<String> = df_arrow_schema
@@ -482,20 +556,38 @@ async fn apply_merge(
         .iter()
         .map(|f| f.name().clone())
         .collect();
+    let has_change_type = all_cols.iter().any(|c| c == CDF_CHANGE_TYPE_COL);
+    let data_cols: Vec<String> = all_cols
+        .iter()
+        .filter(|c| !is_cdf_metadata_col(c))
+        .cloned()
+        .collect();
     // Sanity-check: every merge key must still be present after the transform.
     for k in &spec.keys {
-        if !all_cols.iter().any(|c| c == k) {
+        if !data_cols.iter().any(|c| c == k) {
             return Err(anyhow!(
                 "merge key '{}' missing from source after transform; columns: [{}]",
                 k,
-                all_cols.join(", ")
+                data_cols.join(", ")
             ));
         }
     }
     let update_cols: Vec<String> = if spec.update_columns.is_empty() {
-        all_cols.iter().filter(|c| !key_set.contains(c.as_str())).cloned().collect()
+        data_cols.iter().filter(|c| !key_set.contains(c.as_str())).cloned().collect()
     } else {
         spec.update_columns.clone()
+    };
+
+    // Target-facing schema: drop CDF metadata cols. This is what the target will
+    // be created with (if it doesn't exist) and what additive evolution diffs against.
+    let target_schema: ArrowSchemaRef = {
+        let fields: Vec<arrow::datatypes::FieldRef> = df_arrow_schema
+            .fields()
+            .iter()
+            .filter(|f| !is_cdf_metadata_col(f.name()))
+            .cloned()
+            .collect();
+        Arc::new(arrow::datatypes::Schema::new(fields))
     };
 
     // Join predicate: target."k1" = source."k1" AND ...
@@ -507,34 +599,30 @@ async fn apply_merge(
         .collect::<Vec<_>>()
         .join(" AND ");
 
-    // Open / create target using the POST-TRANSFORM schema so a fresh
-    // target gets the columns that the user actually produces.
+    // Open / create target using the data-only schema (no CDF metadata cols).
     let t_open = Instant::now();
-    let mut target = open_or_create_target(target_uri, target_storage_options, &df_arrow_schema).await?;
+    let mut target = open_or_create_target(target_uri, target_storage_options, &target_schema).await?;
     tracing::debug!(
         "[sink] target opened (v{}) in {}ms",
         version_to_i64(target.version()),
         t_open.elapsed().as_millis()
     );
 
-    // Additive schema evolution: if the post-transform dataframe has columns
-    // the target doesn't, ALTER TABLE ADD COLUMN before merging. Newly added
-    // columns are forced nullable so existing rows simply have NULL there.
-    // Dropped/renamed columns in the target are NOT removed — those will fall
-    // through to the merge planner which today errors on them; that's a
-    // deliberate safety choice.
+    // Additive schema evolution: if the post-transform dataframe has data
+    // columns the target doesn't, ALTER TABLE ADD COLUMN before merging.
+    // CDF metadata columns are NEVER added to the target.
     {
         use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
-        let target_schema = target
+        let target_existing = target
             .snapshot()
             .map_err(|e| anyhow!("read target snapshot: {}", e))?
             .schema();
-        let target_field_names: std::collections::HashSet<String> = target_schema
+        let target_field_names: std::collections::HashSet<String> = target_existing
             .fields()
             .map(|f| f.name().to_string())
             .collect();
         let mut new_fields: Vec<deltalake::kernel::StructField> = Vec::new();
-        for f in df_arrow_schema.fields() {
+        for f in target_schema.fields() {
             if !target_field_names.contains(f.name()) {
                 let dt: deltalake::kernel::DataType =
                     (&deltalake::arrow::datatypes::DataType::from(f.data_type().clone()))
@@ -546,8 +634,6 @@ async fn apply_merge(
                                 e
                             )
                         })?;
-                // Force nullable so existing target rows can be NULL on the
-                // new column without any backfill.
                 new_fields.push(deltalake::kernel::StructField::new(
                     f.name().clone(),
                     dt,
@@ -575,12 +661,23 @@ async fn apply_merge(
         .with_target_alias("target")
         .with_safe_cast(true);
     tracing::debug!(
-        "[sink] merge predicate: {} | update_cols=[{}]",
+        "[sink] merge predicate: {} | update_cols=[{}] | has_change_type={}",
         predicate_str,
-        update_cols.join(", ")
+        update_cols.join(", "),
+        has_change_type
     );
 
-    // WHEN MATCHED DELETE — added before update so it takes precedence per delta-rs ordering.
+    // CDF auto-routing: if `_change_type` survived the transform, route delete
+    // change rows to MATCHED-DELETE first (delta-rs evaluates matched clauses
+    // in order; first match wins). Update/insert clauses then get gated against
+    // non-delete change types so they don't fire for delete tombstones.
+    if has_change_type {
+        merge_op = merge_op.when_matched_delete(|d| {
+            d.predicate("source.\"_change_type\" = 'delete'")
+        })?;
+    }
+
+    // User-supplied WHEN MATCHED DELETE — added after the auto-route.
     if let Some(del_pred) = &spec.when_matched_delete_predicate {
         let pred = del_pred.clone();
         merge_op = merge_op.when_matched_delete(|d| d.predicate(pred))?;
@@ -589,9 +686,22 @@ async fn apply_merge(
     // WHEN MATCHED UPDATE
     {
         let cols = update_cols.clone();
-        let upd_pred = spec.when_matched_update_predicate.clone();
+        let upd_pred_user = spec.when_matched_update_predicate.clone();
         merge_op = merge_op.when_matched_update(|mut u| {
-            if let Some(p) = upd_pred {
+            // Combine user predicate (if any) with the CDF non-delete gate.
+            let pred = match (upd_pred_user, has_change_type) {
+                (Some(p), true) => Some(format!(
+                    "({}) AND (source.\"_change_type\" IS NULL OR source.\"_change_type\" <> 'delete')",
+                    p
+                )),
+                (Some(p), false) => Some(p),
+                (None, true) => Some(
+                    "source.\"_change_type\" IS NULL OR source.\"_change_type\" <> 'delete'"
+                        .to_string(),
+                ),
+                (None, false) => None,
+            };
+            if let Some(p) = pred {
                 u = u.predicate(p);
             }
             for c in &cols {
@@ -601,12 +711,24 @@ async fn apply_merge(
         })?;
     }
 
-    // WHEN NOT MATCHED INSERT
+    // WHEN NOT MATCHED INSERT — never insert delete tombstones.
     {
-        let cols = all_cols.clone();
-        let ins_pred = spec.when_not_matched_insert_predicate.clone();
+        let cols = data_cols.clone();
+        let ins_pred_user = spec.when_not_matched_insert_predicate.clone();
         merge_op = merge_op.when_not_matched_insert(|mut i| {
-            if let Some(p) = ins_pred {
+            let pred = match (ins_pred_user, has_change_type) {
+                (Some(p), true) => Some(format!(
+                    "({}) AND (source.\"_change_type\" IS NULL OR source.\"_change_type\" <> 'delete')",
+                    p
+                )),
+                (Some(p), false) => Some(p),
+                (None, true) => Some(
+                    "source.\"_change_type\" IS NULL OR source.\"_change_type\" <> 'delete'"
+                        .to_string(),
+                ),
+                (None, false) => None,
+            };
+            if let Some(p) = pred {
                 i = i.predicate(p);
             }
             for c in &cols {
