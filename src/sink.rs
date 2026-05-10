@@ -510,12 +510,64 @@ async fn apply_merge(
     // Open / create target using the POST-TRANSFORM schema so a fresh
     // target gets the columns that the user actually produces.
     let t_open = Instant::now();
-    let target = open_or_create_target(target_uri, target_storage_options, &df_arrow_schema).await?;
+    let mut target = open_or_create_target(target_uri, target_storage_options, &df_arrow_schema).await?;
     tracing::debug!(
         "[sink] target opened (v{}) in {}ms",
         version_to_i64(target.version()),
         t_open.elapsed().as_millis()
     );
+
+    // Additive schema evolution: if the post-transform dataframe has columns
+    // the target doesn't, ALTER TABLE ADD COLUMN before merging. Newly added
+    // columns are forced nullable so existing rows simply have NULL there.
+    // Dropped/renamed columns in the target are NOT removed — those will fall
+    // through to the merge planner which today errors on them; that's a
+    // deliberate safety choice.
+    {
+        use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
+        let target_schema = target
+            .snapshot()
+            .map_err(|e| anyhow!("read target snapshot: {}", e))?
+            .schema();
+        let target_field_names: std::collections::HashSet<String> = target_schema
+            .fields()
+            .map(|f| f.name().to_string())
+            .collect();
+        let mut new_fields: Vec<deltalake::kernel::StructField> = Vec::new();
+        for f in df_arrow_schema.fields() {
+            if !target_field_names.contains(f.name()) {
+                let dt: deltalake::kernel::DataType =
+                    (&deltalake::arrow::datatypes::DataType::from(f.data_type().clone()))
+                        .try_into_kernel()
+                        .map_err(|e| {
+                            anyhow!(
+                                "additive evolution: cannot convert type for new column {}: {}",
+                                f.name(),
+                                e
+                            )
+                        })?;
+                // Force nullable so existing target rows can be NULL on the
+                // new column without any backfill.
+                new_fields.push(deltalake::kernel::StructField::new(
+                    f.name().clone(),
+                    dt,
+                    true,
+                ));
+            }
+        }
+        if !new_fields.is_empty() {
+            let added: Vec<String> = new_fields.iter().map(|f| f.name().clone()).collect();
+            tracing::info!(
+                "[sink] additive schema evolution: adding column(s) [{}] to target before merge",
+                added.join(", ")
+            );
+            target = DeltaOps(target)
+                .add_columns()
+                .with_fields(new_fields)
+                .await
+                .map_err(|e| anyhow!("ALTER TABLE ADD COLUMN failed: {}", e))?;
+        }
+    }
 
     let mut merge_op = DeltaOps(target)
         .merge(df, predicate_str.clone())
