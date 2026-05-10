@@ -696,13 +696,23 @@ rustValidateBtn?.addEventListener('click', async () => {
 streamForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (streamRunning) {
+    // Optimistic feedback: the backend stop sequence can take ~16s
+    // (10s cooperative timeout + 6s heartbeat drain) before status flips
+    // to "Stopped". Without this, the button looks unresponsive.
     streamRunBtn.disabled = true;
+    streamRunBtn.textContent = 'Stopping...';
+    document.getElementById('streamKpiStatus').textContent = 'Stopping...';
     try {
       const r = await fetch('/api/sink/stop', { method: 'POST' });
       if (!r.ok) throw new Error(await r.text());
       toast('Stream stop requested', 'ok');
-    } catch (err) { toast('Stop failed: ' + err.message, 'error'); }
-    finally { streamRunBtn.disabled = false; }
+    } catch (err) {
+      toast('Stop failed: ' + err.message, 'error');
+      // Re-enable so the user can retry; SSE will fix the label on next tick.
+      streamRunBtn.disabled = false;
+    }
+    // Note: do NOT re-enable here on success — SSE will reset the button
+    // to "Start streaming" once the backend reports running=false.
     return;
   }
   const o = formObject(streamForm);
@@ -885,7 +895,21 @@ evt.onmessage = (e) => {
   // ---- stream ----
   const sk = s.sink || {};
   streamRunning = !!sk.running;
-  setRunButton(streamRunBtn, streamRunning, 'Start streaming', 'Stop streaming');
+  // When backend is in the cooperative-stop window (status starts with
+  // "Stopping"), show "Stopping..." disabled instead of reverting to
+  // "Stop streaming". Once running flips to false, normal label returns.
+  const stopping = streamRunning && typeof sk.status === 'string' && sk.status.startsWith('Stopping');
+  if (stopping) {
+    streamRunBtn.textContent = 'Stopping...';
+    streamRunBtn.disabled = true;
+    streamRunBtn.classList.toggle('bg-rose-600', true);
+    streamRunBtn.classList.toggle('hover:bg-rose-700', false);
+    streamRunBtn.classList.toggle('bg-indigo-600', false);
+    streamRunBtn.classList.toggle('hover:bg-indigo-700', false);
+  } else {
+    streamRunBtn.disabled = false;
+    setRunButton(streamRunBtn, streamRunning, 'Start streaming', 'Stop streaming');
+  }
   document.getElementById('streamKpiStatus').textContent = sk.status || 'idle';
   document.getElementById('streamKpiBatches').textContent = fmt(sk.batches_processed);
   document.getElementById('streamKpiVersion').textContent = sk.target_version ?? '—';

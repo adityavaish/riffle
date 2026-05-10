@@ -441,6 +441,7 @@ async fn run_sink_loop(
             let hb_mode = sink_cfg.mode.name().to_string();
             let hb_done = Arc::new(AtomicBool::new(false));
             let hb_done_b = hb_done.clone();
+            let hb_cancel = cancel.clone();
             let hb_thread = std::thread::Builder::new()
                 .name(format!("riffle-hb-{}", group_start))
                 .spawn(move || {
@@ -450,6 +451,15 @@ async fn run_sink_loop(
                         std::thread::sleep(Duration::from_secs(5));
                         if hb_done_b.load(Ordering::Relaxed) {
                             break;
+                        }
+                        // Once cancellation has been requested, do NOT overwrite
+                        // the "Stopping..." status that the controller set —
+                        // otherwise the dashboard will keep oscillating between
+                        // "Stopping..." and "in progress..." for the entire
+                        // 10s + 6s drain window, making it look like Stop did
+                        // nothing.
+                        if hb_cancel.load(Ordering::Relaxed) {
+                            continue;
                         }
                         tick += 1;
                         let secs = start.elapsed().as_secs();
