@@ -115,6 +115,16 @@ pub struct StreamArgs {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
 struct Checkpoint {
     last_sunk_version: i64,
+    /// Source Delta table URI this checkpoint belongs to. Used to detect
+    /// when a checkpoint file is reused against a different source (which
+    /// would otherwise silently skip versions). Optional for backward
+    /// compatibility with older checkpoint files written before this field
+    /// was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_uri: Option<String>,
+    /// Target Delta table URI for sanity (informational; not enforced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_uri: Option<String>,
 }
 
 fn load_checkpoint(path: &std::path::Path) -> Option<Checkpoint> {
@@ -298,10 +308,53 @@ async fn run_sink_loop(
 ) -> Result<()> {
     let ckpt_path = PathBuf::from(&launch.checkpoint_file);
     let mut last_sunk: i64 = match launch.start_version {
-        Some(v) => v - 1,
-        None => load_checkpoint(&ckpt_path)
-            .map(|c| c.last_sunk_version)
-            .unwrap_or(-1),
+        Some(v) => {
+            // Explicit override: trust the user but warn if it conflicts with
+            // an existing checkpoint for a different source.
+            if let Some(existing) = load_checkpoint(&ckpt_path) {
+                if let Some(prev_src) = &existing.source_uri {
+                    if prev_src != &launch.source_uri {
+                        tracing::warn!(
+                            "[stream] checkpoint file {} was last used for source {} but is now being used for {} (--start-version override accepted)",
+                            ckpt_path.display(),
+                            prev_src,
+                            launch.source_uri
+                        );
+                    }
+                }
+            }
+            v - 1
+        }
+        None => match load_checkpoint(&ckpt_path) {
+            Some(existing) => {
+                // Safety check: refuse to silently reuse a checkpoint that
+                // belongs to a different source. Skipping versions on a
+                // different source is almost always a bug, not a feature.
+                if let Some(prev_src) = &existing.source_uri {
+                    if prev_src != &launch.source_uri {
+                        return Err(anyhow::anyhow!(
+                            "checkpoint file {} belongs to source `{}` but the configured source is `{}`. \
+                             Refusing to resume to avoid silently skipping versions. \
+                             Either point at the original source, delete/move the checkpoint file, \
+                             choose a different --checkpoint-file path, or set an explicit --start-version to override.",
+                            ckpt_path.display(),
+                            prev_src,
+                            launch.source_uri
+                        ));
+                    }
+                } else {
+                    // Older checkpoint files (pre-source_uri) — accept but warn
+                    // so the user can fix it on next save.
+                    tracing::warn!(
+                        "[stream] checkpoint file {} has no source_uri (legacy format); will adopt source `{}` on next save",
+                        ckpt_path.display(),
+                        launch.source_uri
+                    );
+                }
+                existing.last_sunk_version
+            }
+            None => -1,
+        },
     };
     tracing::info!(
         "[stream] starting loop: source={} target={} mode={} poll_interval={}s max_versions_per_batch={} resume_after_v{}",
@@ -459,6 +512,8 @@ async fn run_sink_loop(
                 &ckpt_path,
                 &Checkpoint {
                     last_sunk_version: last_sunk,
+                    source_uri: Some(launch.source_uri.clone()),
+                    target_uri: Some(sink_cfg.target_uri.clone()),
                 },
             )
             .ok();
