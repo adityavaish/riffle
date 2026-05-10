@@ -173,8 +173,15 @@ async fn open_client(
     if !cfg.consumer_group.trim().is_empty() {
         builder = builder.with_consumer_group(cfg.consumer_group.clone());
     }
+    // Be lenient about how the user types the namespace: accept any of
+    //   myns
+    //   myns.servicebus.windows.net
+    //   sb://myns.servicebus.windows.net
+    //   https://myns.servicebus.windows.net:443/
+    // and reduce to the FQDN host.
+    let ns_host = sanitize_namespace(&cfg.namespace);
     let consumer = builder
-        .open(&cfg.namespace, cfg.event_hub.clone(), credential)
+        .open(&ns_host, cfg.event_hub.clone(), credential)
         .await
         .map_err(|e| anyhow!("open EventHub consumer: {}", e))?;
     let partitions = if let Some(ps) = cfg.partitions.as_ref() {
@@ -190,6 +197,29 @@ async fn open_client(
         return Err(anyhow!("no partitions discovered for {}", cfg.event_hub));
     }
     Ok((consumer, partitions))
+}
+
+/// Strip scheme, port, path, and whitespace from a user-supplied namespace
+/// string. Returns the FQDN host that `ConsumerClient::open` expects.
+fn sanitize_namespace(raw: &str) -> String {
+    let mut s = raw.trim();
+    for scheme in ["amqps://", "sb://", "https://", "http://"] {
+        if let Some(rest) = s.strip_prefix(scheme) {
+            s = rest;
+            break;
+        }
+    }
+    // Drop a path suffix if present (e.g. trailing '/' or '/hubname').
+    let s = match s.find('/') {
+        Some(i) => &s[..i],
+        None => s,
+    };
+    // Drop a port suffix if present (e.g. ':443').
+    let s = match s.rsplit_once(':') {
+        Some((host, _port)) => host,
+        None => s,
+    };
+    s.trim().to_string()
 }
 
 /// Resolve the per-partition `StartPosition` from checkpoint offsets and

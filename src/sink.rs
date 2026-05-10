@@ -495,40 +495,9 @@ async fn apply_merge(
         .read_batches(batches)
         .map_err(|e: DataFusionError| anyhow!("read_batches failed: {}", e))?;
 
-    // Source-side dedup on merge keys to avoid the "MERGE matched a target row with multiple
-    // source rows" error. Use ROW_NUMBER() OVER (PARTITION BY keys ORDER BY <order_col DESC>)
-    // and keep rn = 1. With CDF, the natural order is `_commit_version DESC` so the most
-    // recent change per key wins (e.g. an `insert` followed by `delete` becomes just `delete`).
-    let df = {
-        let view_name = "__riffle_merge_src";
-        ctx.register_table(view_name, df.into_view())
-            .map_err(|e: DataFusionError| anyhow!("register source view failed: {}", e))?;
-        let part_by = spec
-            .keys
-            .iter()
-            .map(|k| format!("\"{}\"", k))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let order_by = match &spec.dedupe_order_by {
-            Some(c) if !c.is_empty() => format!("\"{}\" DESC", c),
-            _ => "\"_commit_version\" DESC".to_string(),
-        };
-        let cols = schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT {cols} FROM (SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY {part_by} ORDER BY {order_by}) AS __rn FROM {view_name}) WHERE __rn = 1"
-        );
-        tracing::debug!("[sink] merge source dedup sql: {}", sql);
-        ctx.sql(&sql)
-            .await
-            .map_err(|e: DataFusionError| anyhow!("dedup sql failed: {}", e))?
-    };
-
-    // Optional user Rust transform: collect dedup'd source -> apply -> rebuild df.
+    // Optional user Rust transform — runs FIRST so it can produce the merge
+    // keys (e.g. extracting `event_id` from a JSON `body` column on an EH
+    // source). The downstream dedup operates on the post-transform schema.
     let df = if let Some(rust_lib) = spec.transform_rust.as_ref() {
         tracing::debug!("[sink] applying user-supplied Rust transform");
         let in_batches = df
@@ -546,10 +515,15 @@ async fn apply_merge(
         df
     };
 
-    // Optional user SQL transform: run it against the dedup'd source as `__src`.
-    // The view exposes the CDF columns (`_change_type`, `_commit_version`,
-    // `_commit_timestamp`) so users can filter on them, e.g.
-    //   SELECT id, name FROM __src WHERE _change_type IN ('insert','update_postimage')
+    // Optional user SQL transform — runs against the source as `__src`. The
+    // view exposes CDF columns (`_change_type`, `_commit_version`,
+    // `_commit_timestamp`) when present, plus the EH columns (`partition_id`,
+    // `offset`, `sequence_number`, `enqueued_time`, `body`, `properties`)
+    // when the source is Event Hub. Use this to project the merge keys.
+    //
+    // Examples:
+    //   CDF:  SELECT id, name FROM __src WHERE _change_type IN ('insert','update_postimage')
+    //   EH:   SELECT get_field(body::json, 'event_id') AS event_id, body FROM __src
     let df = if let Some(user_sql) = spec.transform_sql.as_deref().filter(|s| !s.trim().is_empty()) {
         let view = "__src";
         let _ = ctx.deregister_table(view);
@@ -562,6 +536,77 @@ async fn apply_merge(
     } else {
         df
     };
+
+    // Validate merge keys are present in the post-transform schema before
+    // attempting source-side dedup (which would otherwise fail with a less
+    // helpful "No field named ..." SQL error).
+    let post_xform_cols: Vec<String> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    for k in &spec.keys {
+        if !post_xform_cols.iter().any(|c| c == k) {
+            return Err(anyhow!(
+                "merge key '{}' is not present in the source after the transform. \
+                 Columns available: [{}]. Use --merge-transform-sql (or the dashboard \
+                 Transform SQL field) to project the key(s) the target expects. \
+                 For Event Hub sources, a typical transform is: \
+                 `SELECT get_field(body::json, 'event_id') AS event_id, ... FROM __src`.",
+                k,
+                post_xform_cols.join(", ")
+            ));
+        }
+    }
+
+    // Source-side dedup on merge keys to avoid the "MERGE matched a target row
+    // with multiple source rows" error. Use ROW_NUMBER() OVER (PARTITION BY
+    // keys ORDER BY <order_col DESC>) and keep rn = 1.
+    //
+    // Default order column: prefer `_commit_version` (CDF), then
+    // `sequence_number` (Event Hub), then the first merge key (deterministic
+    // but arbitrary). User can override with `dedupe_order_by`.
+    let df = {
+        let view_name = "__riffle_merge_src";
+        let _ = ctx.deregister_table(view_name);
+        ctx.register_table(view_name, df.into_view())
+            .map_err(|e: DataFusionError| anyhow!("register source view failed: {}", e))?;
+        let part_by = spec
+            .keys
+            .iter()
+            .map(|k| format!("\"{}\"", k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let order_by = match &spec.dedupe_order_by {
+            Some(c) if !c.is_empty() => format!("\"{}\" DESC", c),
+            _ => {
+                if post_xform_cols.iter().any(|c| c == CDF_COMMIT_VERSION_COL) {
+                    format!("\"{}\" DESC", CDF_COMMIT_VERSION_COL)
+                } else if post_xform_cols.iter().any(|c| c == "sequence_number") {
+                    "\"sequence_number\" DESC".to_string()
+                } else {
+                    format!("\"{}\"", spec.keys[0])
+                }
+            }
+        };
+        let cols = post_xform_cols
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {cols} FROM (SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY {part_by} ORDER BY {order_by}) AS __rn FROM {view_name}) WHERE __rn = 1"
+        );
+        tracing::debug!("[sink] merge source dedup sql: {}", sql);
+        ctx.sql(&sql)
+            .await
+            .map_err(|e: DataFusionError| anyhow!("dedup sql failed: {}", e))?
+    };
+
+    // The unused `schema` parameter (CDF read schema) is no longer needed in
+    // this branch; silence the warning.
+    let _ = schema;
 
     // Determine which columns are updated/inserted. Use the (possibly-transformed)
     // dataframe's schema so transforms that rename/drop columns are honoured.
