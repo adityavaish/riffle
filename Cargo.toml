@@ -32,6 +32,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 libloading = "0.8"
 dirs = "5"
+base64 = "0.22"
+azure_messaging_eventhubs = "0.14"
+azure_identity = "0.35"
+azure_core = "0.30"
 
 [[bin]]
 name = "riffle"

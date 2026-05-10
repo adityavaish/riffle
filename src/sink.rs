@@ -347,6 +347,29 @@ pub async fn apply(
         cfg.target_uri
     );
 
+    let outcome = apply_with_batches(cfg, batches, schema, source_rows).await?;
+
+    Ok(SinkOutcome {
+        duration_ms: t0.elapsed().as_millis() as u64,
+        ..outcome
+    })
+}
+
+/// Apply pre-collected RecordBatches to the configured sink mode.
+///
+/// Used by both:
+///  * the Delta-CDF source (`apply()`) after reading change rows;
+///  * the Event Hub source path (which already has a RecordBatch stream).
+///
+/// Append/overwrite paths drop CDF metadata columns when present (no-op for
+/// non-CDF sources). Merge auto-routes `_change_type='delete'` rows when the
+/// column is present, and otherwise treats every row as an upsert.
+pub async fn apply_with_batches(
+    cfg: &SinkConfig,
+    batches: Vec<RecordBatch>,
+    schema: ArrowSchemaRef,
+    source_rows: u64,
+) -> Result<SinkOutcome> {
     let t_write = Instant::now();
     let t_open = Instant::now();
     let outcome = match &cfg.mode {
@@ -380,11 +403,7 @@ pub async fn apply(
         t_write.elapsed().as_millis(),
         outcome.target_version
     );
-
-    Ok(SinkOutcome {
-        duration_ms: t0.elapsed().as_millis() as u64,
-        ..outcome
-    })
+    Ok(outcome)
 }
 
 async fn apply_append(

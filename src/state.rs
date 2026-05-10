@@ -142,6 +142,11 @@ pub struct SinkEvent {
 /// Sent from the web UI (POST /api/sink/start) or constructed from CLI args.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct SinkLaunchConfig {
+    /// Source kind: "delta" (default) or "eventhub".
+    #[serde(default = "default_source_kind")]
+    pub source_kind: String,
+    /// Source Delta table URI (used when `source_kind == "delta"`).
+    #[serde(default)]
     pub source_uri: String,
     pub target_uri: String,
     pub sink_mode: String,
@@ -186,6 +191,31 @@ pub struct SinkLaunchConfig {
     pub azure_auth: String,
     #[serde(default = "default_checkpoint")]
     pub checkpoint_file: String,
+
+    // -------------------------------------------------------------------
+    // Event Hub source — only used when `source_kind == "eventhub"`
+    // -------------------------------------------------------------------
+    /// Fully-qualified EH namespace host (e.g. `myns.servicebus.windows.net`).
+    #[serde(default)]
+    pub eh_namespace: String,
+    /// Event Hub instance (entity) name.
+    #[serde(default)]
+    pub eh_event_hub: String,
+    /// Consumer group; defaults to `$Default`.
+    #[serde(default = "default_eh_cg")]
+    pub eh_consumer_group: String,
+    /// Initial position when no checkpoint exists: "earliest" or "latest".
+    #[serde(default = "default_eh_initial_position")]
+    pub eh_initial_position: String,
+    /// Max events accumulated before forcing a flush to the sink.
+    #[serde(default = "default_eh_max_events")]
+    pub eh_max_events_per_batch: usize,
+    /// Time-based flush — close the batch even if the count cap isn't hit.
+    #[serde(default = "default_eh_batch_timeout")]
+    pub eh_batch_timeout_secs: u64,
+    /// Optional comma-separated explicit partition list. Empty = all partitions.
+    #[serde(default)]
+    pub eh_partitions: String,
 }
 
 fn default_poll_interval() -> u64 { 5 }
@@ -193,6 +223,11 @@ fn default_max_versions() -> usize { 10 }
 fn default_read_concurrency() -> usize { 8 }
 fn default_azure_auth() -> String { "auto".to_string() }
 fn default_checkpoint() -> String { "./riffle-stream-ckpt.json".to_string() }
+fn default_source_kind() -> String { "delta".to_string() }
+fn default_eh_cg() -> String { "$Default".to_string() }
+fn default_eh_initial_position() -> String { "latest".to_string() }
+fn default_eh_max_events() -> usize { 5_000 }
+fn default_eh_batch_timeout() -> u64 { 5 }
 
 /// Commands sent from the web layer to the sink controller task.
 #[derive(Debug)]

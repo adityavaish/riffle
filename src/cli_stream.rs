@@ -35,9 +35,45 @@ use crate::util::{parse_table_uri, version_to_i64};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct StreamArgs {
+    /// Source kind: `delta` (default) or `eventhub`.
+    #[arg(long, default_value = "delta")]
+    source_kind: String,
+
     /// Source Delta table URI. Optional — if omitted, configure via dashboard.
+    /// Only used when --source-kind=delta.
     #[arg(long)]
     source_uri: Option<String>,
+
+    /// Event Hub fully-qualified namespace, e.g. `myns.servicebus.windows.net`.
+    /// Required when --source-kind=eventhub.
+    #[arg(long, default_value = "")]
+    eh_namespace: String,
+
+    /// Event Hub instance (entity) name. Required when --source-kind=eventhub.
+    #[arg(long, default_value = "")]
+    eh_event_hub: String,
+
+    /// Event Hub consumer group. Default: `$Default`.
+    #[arg(long, default_value = "$Default")]
+    eh_consumer_group: String,
+
+    /// Initial position when no checkpoint exists: `earliest` or `latest`.
+    #[arg(long, default_value = "latest")]
+    eh_initial_position: String,
+
+    /// Maximum events accumulated before forcing a flush to the sink.
+    #[arg(long, default_value_t = 5_000)]
+    eh_max_events_per_batch: usize,
+
+    /// Time-based flush — close the batch even if `max_events_per_batch`
+    /// is not reached.
+    #[arg(long, default_value_t = 5)]
+    eh_batch_timeout_secs: u64,
+
+    /// Optional comma-separated explicit partition list (e.g. "0,1,2"). Empty
+    /// = consume all partitions.
+    #[arg(long, default_value = "")]
+    eh_partitions: String,
 
     /// Target Delta table URI. Optional — if omitted, configure via dashboard.
     #[arg(long)]
@@ -135,12 +171,40 @@ struct Checkpoint {
     target_uri: Option<String>,
 }
 
+/// Per-partition Event Hub checkpoint (separate file format from the Delta
+/// version-based checkpoint). Stored at the same `--checkpoint-file` path
+/// when the source kind is `eventhub`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
+struct EventHubCheckpoint {
+    /// Tag used to detect format mismatch on reload.
+    kind: String,
+    /// `eh:<namespace>|<hub>|<consumer_group>` — must match the configured
+    /// source on resume; refused otherwise (avoid silently skipping events).
+    source_signature: String,
+    /// Map of partition_id → last successfully-sunk sequence number.
+    offsets: std::collections::HashMap<String, i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_uri: Option<String>,
+}
+
 fn load_checkpoint(path: &std::path::Path) -> Option<Checkpoint> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
 fn save_checkpoint(path: &std::path::Path, ckpt: &Checkpoint) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(ckpt)?;
+    std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn load_eh_checkpoint(path: &std::path::Path) -> Option<EventHubCheckpoint> {
+    let bytes = std::fs::read(path).ok()?;
+    let ckpt: EventHubCheckpoint = serde_json::from_slice(&bytes).ok()?;
+    if ckpt.kind == "eventhub" { Some(ckpt) } else { None }
+}
+
+fn save_eh_checkpoint(path: &std::path::Path, ckpt: &EventHubCheckpoint) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(ckpt)?;
     std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -174,18 +238,34 @@ impl Controller {
         if self.is_running() {
             return Err("a sink job is already running; stop it first".into());
         }
-        if cfg.source_uri.is_empty() || cfg.target_uri.is_empty() {
+        let is_eh_source = cfg.source_kind.eq_ignore_ascii_case("eventhub");
+        if is_eh_source {
+            if cfg.eh_namespace.trim().is_empty() || cfg.eh_event_hub.trim().is_empty() {
+                return Err("eh_namespace and eh_event_hub are required for eventhub source".into());
+            }
+            if cfg.target_uri.is_empty() {
+                return Err("target_uri is required".into());
+            }
+        } else if cfg.source_uri.is_empty() || cfg.target_uri.is_empty() {
             return Err("source_uri and target_uri are required".into());
         }
         self.gate.acquire("stream").await?;
 
-        let source_backend = Backend::detect(&cfg.source_uri);
         let target_backend = Backend::detect(&cfg.target_uri);
+        let source_backend_opt = if is_eh_source {
+            None
+        } else {
+            Some(Backend::detect(&cfg.source_uri))
+        };
         let mut to_register = vec![];
-        if !self.backends_registered.contains(&source_backend) {
-            to_register.push(source_backend);
-        }
-        if source_backend != target_backend && !self.backends_registered.contains(&target_backend) {
+        if let Some(source_backend) = source_backend_opt {
+            if !self.backends_registered.contains(&source_backend) {
+                to_register.push(source_backend);
+            }
+            if source_backend != target_backend && !self.backends_registered.contains(&target_backend) {
+                to_register.push(target_backend);
+            }
+        } else if !self.backends_registered.contains(&target_backend) {
             to_register.push(target_backend);
         }
         if !to_register.is_empty() {
@@ -195,8 +275,12 @@ impl Controller {
             }
         }
 
-        let source_storage = build_storage_options(&cfg.source_uri, &cfg.azure_auth)
-            .map_err(|e| format!("source storage opts: {}", e))?;
+        let source_storage = if is_eh_source {
+            std::collections::HashMap::new()
+        } else {
+            build_storage_options(&cfg.source_uri, &cfg.azure_auth)
+                .map_err(|e| format!("source storage opts: {}", e))?
+        };
         let target_storage = build_storage_options(&cfg.target_uri, &cfg.azure_auth)
             .map_err(|e| format!("target storage opts: {}", e))?;
         let transform_rust_lib = match cfg.merge_transform_rust.as_deref() {
@@ -232,8 +316,15 @@ impl Controller {
         // Reset / seed dashboard state.
         {
             let mut s = self.state.lock().await;
-            s.table_uri = cfg.source_uri.clone();
-            s.backend = format!("{:?}", source_backend);
+            s.table_uri = if is_eh_source {
+                format!("eventhub://{}/{}", cfg.eh_namespace, cfg.eh_event_hub)
+            } else {
+                cfg.source_uri.clone()
+            };
+            s.backend = match source_backend_opt {
+                Some(b) => format!("{:?}", b),
+                None => "EventHub".to_string(),
+            };
             s.sink.enabled = true;
             s.sink.running = true;
             s.sink.last_error = String::new();
@@ -361,6 +452,10 @@ async fn run_sink_loop(
     source_storage_options: std::collections::HashMap<String, String>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
+    if launch.source_kind.eq_ignore_ascii_case("eventhub") {
+        return run_eventhub_loop(state, sink_cfg, launch, cancel).await;
+    }
+
     let ckpt_path = PathBuf::from(&launch.checkpoint_file);
     let mut last_sunk: i64 = match launch.start_version {
         Some(v) => {
@@ -629,6 +724,169 @@ async fn run_sink_loop(
             return Ok(());
         }
     }
+}
+
+/// Stream loop for the Event Hub source. Spawns one consumer task per
+/// partition (in `EventHubReader::open`) and pulls completed batches out of
+/// the shared mpsc channel.
+async fn run_eventhub_loop(
+    state: SharedState,
+    sink_cfg: SinkConfig,
+    launch: SinkLaunchConfig,
+    cancel: Arc<AtomicBool>,
+) -> Result<()> {
+    use crate::source_eventhub::{
+        EventHubReader, EventHubSourceConfig, InitialPosition,
+    };
+    let initial = InitialPosition::parse(&launch.eh_initial_position)?;
+    let partitions = if launch.eh_partitions.trim().is_empty() {
+        None
+    } else {
+        Some(
+            launch
+                .eh_partitions
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let eh_cfg = EventHubSourceConfig {
+        namespace: launch.eh_namespace.clone(),
+        event_hub: launch.eh_event_hub.clone(),
+        consumer_group: if launch.eh_consumer_group.trim().is_empty() {
+            "$Default".to_string()
+        } else {
+            launch.eh_consumer_group.clone()
+        },
+        initial_position: initial,
+        max_events_per_batch: launch.eh_max_events_per_batch.max(1),
+        batch_timeout_secs: launch.eh_batch_timeout_secs.max(1),
+        partitions,
+    };
+
+    // Resume offsets — refuse on signature mismatch.
+    let ckpt_path = PathBuf::from(&launch.checkpoint_file);
+    let signature = eh_cfg.checkpoint_signature();
+    let mut offsets: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    if let Some(prev) = load_eh_checkpoint(&ckpt_path) {
+        if prev.source_signature != signature {
+            return Err(anyhow::anyhow!(
+                "checkpoint file {} belongs to source `{}` but the configured source is `{}`. \
+                 Refusing to resume to avoid silently skipping events. \
+                 Either point at the original source, choose a different --checkpoint-file path, \
+                 or delete the checkpoint file.",
+                ckpt_path.display(),
+                prev.source_signature,
+                signature
+            ));
+        }
+        offsets = prev.offsets.clone();
+        tracing::info!(
+            "[stream] resuming EH from checkpoint: {} partition(s), offsets={:?}",
+            offsets.len(),
+            offsets
+        );
+    } else {
+        tracing::info!(
+            "[stream] no EH checkpoint found; starting from {:?}",
+            initial
+        );
+    }
+
+    tracing::info!(
+        "[stream] starting EH loop: ns={} hub={} cg={} initial_position={:?} \
+         max_events_per_batch={} batch_timeout_secs={} target={} mode={}",
+        eh_cfg.namespace,
+        eh_cfg.event_hub,
+        eh_cfg.consumer_group,
+        initial,
+        eh_cfg.max_events_per_batch,
+        eh_cfg.batch_timeout_secs,
+        sink_cfg.target_uri,
+        sink_cfg.mode.name()
+    );
+
+    let mut reader = EventHubReader::open(&eh_cfg, &offsets, cancel.clone()).await?;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            tracing::info!("[stream] EH cancellation requested, exiting loop");
+            break;
+        }
+        {
+            let mut s = state.lock().await;
+            s.sink.status = "Streaming (EH idle)".to_string();
+        }
+        let timeout = Duration::from_secs(eh_cfg.batch_timeout_secs);
+        let next = reader
+            .next_batch(eh_cfg.max_events_per_batch, timeout)
+            .await?;
+        let Some(eh_batch) = next else {
+            // No events in this window — if --once, we can exit; else loop.
+            if launch.once {
+                tracing::info!("[stream] EH --once: no events in initial window; exiting");
+                break;
+            }
+            continue;
+        };
+
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let row_count = eh_batch.row_count;
+        let mut new_offsets = eh_batch.latest_seq_by_partition.clone();
+        tracing::info!(
+            "[stream] EH batch: {} events across {} partition(s)",
+            row_count,
+            new_offsets.len()
+        );
+        {
+            let mut s = state.lock().await;
+            s.sink.status = format!("Applying {} events", row_count);
+        }
+
+        let schema = eh_batch.batch.schema();
+        let batches = vec![eh_batch.batch];
+
+        let t_apply = std::time::Instant::now();
+        let outcome = sink::apply_with_batches(&sink_cfg, batches, schema, row_count).await?;
+        update_sink_state(&state, &sink_cfg, &outcome).await;
+        tracing::info!(
+            "[stream] EH apply done in {}ms: target_v{} inserts={} updates={} deletes={} appended={}",
+            t_apply.elapsed().as_millis(),
+            outcome.target_version,
+            outcome.inserts,
+            outcome.updates,
+            outcome.deletes,
+            outcome.appended
+        );
+
+        // Merge into running offsets (so partitions that didn't appear in
+        // this batch keep their last value).
+        for (k, v) in new_offsets.drain() {
+            let entry = offsets.entry(k).or_insert(v);
+            if v > *entry {
+                *entry = v;
+            }
+        }
+        let ckpt = EventHubCheckpoint {
+            kind: "eventhub".to_string(),
+            source_signature: signature.clone(),
+            offsets: offsets.clone(),
+            target_uri: Some(launch.target_uri.clone()),
+        };
+        if let Err(e) = save_eh_checkpoint(&ckpt_path, &ckpt) {
+            tracing::warn!("[stream] EH checkpoint save failed: {:#}", e);
+        }
+
+        if launch.once {
+            break;
+        }
+    }
+    reader.close().await;
+    Ok(())
 }
 
 async fn update_sink_state(state: &SharedState, sink_cfg: &SinkConfig, outcome: &SinkOutcome) {
@@ -915,59 +1173,73 @@ pub async fn run(args: StreamArgs) -> Result<()> {
     }
 
     // If CLI args provided, auto-start a stream job.
-    let auto_started = match (args.source_uri.clone(), args.target_uri.clone()) {
-        (Some(src), Some(tgt)) => {
-            let cfg = SinkLaunchConfig {
-                source_uri: src,
-                target_uri: tgt,
-                sink_mode: args.sink_mode.clone(),
-                merge_keys: args.merge_keys.clone(),
-                merge_update_columns: args.merge_update_columns.clone(),
-                merge_update_predicate: args.merge_update_predicate.clone(),
-                merge_delete_predicate: args.merge_delete_predicate.clone(),
-                merge_insert_predicate: args.merge_insert_predicate.clone(),
-                merge_dedupe_order_by: args.merge_dedupe_order_by.clone(),
-                merge_transform_sql: args.merge_transform_sql.clone(),
-                merge_transform_rust: match args.merge_transform_rust_file.as_ref() {
-                    Some(p) => match std::fs::read_to_string(p) {
-                        Ok(s) => Some(s),
-                        Err(e) => {
-                            eprintln!("Failed to read {}: {}", p.display(), e);
-                            return Ok(());
-                        }
-                    },
-                    None => None,
+    let is_eh = args.source_kind.eq_ignore_ascii_case("eventhub");
+    let auto_start_ok = if is_eh {
+        // EH: need namespace + hub + target
+        !args.eh_namespace.is_empty()
+            && !args.eh_event_hub.is_empty()
+            && args.target_uri.is_some()
+    } else {
+        args.source_uri.is_some() && args.target_uri.is_some()
+    };
+    let auto_started = if auto_start_ok {
+        let cfg = SinkLaunchConfig {
+            source_kind: args.source_kind.clone(),
+            source_uri: args.source_uri.clone().unwrap_or_default(),
+            target_uri: args.target_uri.clone().unwrap_or_default(),
+            sink_mode: args.sink_mode.clone(),
+            merge_keys: args.merge_keys.clone(),
+            merge_update_columns: args.merge_update_columns.clone(),
+            merge_update_predicate: args.merge_update_predicate.clone(),
+            merge_delete_predicate: args.merge_delete_predicate.clone(),
+            merge_insert_predicate: args.merge_insert_predicate.clone(),
+            merge_dedupe_order_by: args.merge_dedupe_order_by.clone(),
+            merge_transform_sql: args.merge_transform_sql.clone(),
+            merge_transform_rust: match args.merge_transform_rust_file.as_ref() {
+                Some(p) => match std::fs::read_to_string(p) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        eprintln!("Failed to read {}: {}", p.display(), e);
+                        return Ok(());
+                    }
                 },
-                start_version: args.start_version,
-                end_version: args.end_version,
-                once: args.once,
-                poll_interval_secs: args.poll_interval_secs,
-                max_versions_per_batch: args.max_versions_per_batch,
-                max_input_rows_per_batch: args.max_input_rows_per_batch,
-                read_concurrency: args.read_concurrency,
-                azure_auth: args.azure_auth.clone(),
-                checkpoint_file: args.checkpoint_file.to_string_lossy().to_string(),
-            };
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            sink_tx.send(SinkCommand::Start(cfg, reply_tx)).await.ok();
-            match reply_rx.await {
-                Ok(Ok(())) => {
-                    println!("Auto-started sink job from CLI args.");
-                    true
-                }
-                Ok(Err(e)) => {
-                    eprintln!("Failed to auto-start: {}", e);
-                    false
-                }
-                Err(_) => false,
+                None => None,
+            },
+            start_version: args.start_version,
+            end_version: args.end_version,
+            once: args.once,
+            poll_interval_secs: args.poll_interval_secs,
+            max_versions_per_batch: args.max_versions_per_batch,
+            max_input_rows_per_batch: args.max_input_rows_per_batch,
+            read_concurrency: args.read_concurrency,
+            azure_auth: args.azure_auth.clone(),
+            checkpoint_file: args.checkpoint_file.to_string_lossy().to_string(),
+            eh_namespace: args.eh_namespace.clone(),
+            eh_event_hub: args.eh_event_hub.clone(),
+            eh_consumer_group: args.eh_consumer_group.clone(),
+            eh_initial_position: args.eh_initial_position.clone(),
+            eh_max_events_per_batch: args.eh_max_events_per_batch,
+            eh_batch_timeout_secs: args.eh_batch_timeout_secs,
+            eh_partitions: args.eh_partitions.clone(),
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        sink_tx.send(SinkCommand::Start(cfg, reply_tx)).await.ok();
+        match reply_rx.await {
+            Ok(Ok(())) => {
+                println!("Auto-started sink job from CLI args.");
+                true
             }
+            Ok(Err(e)) => {
+                eprintln!("Failed to auto-start: {}", e);
+                false
+            }
+            Err(_) => false,
         }
-        _ => {
-            println!(
-                "No --source-uri/--target-uri provided. Configure & start the job from the dashboard."
-            );
-            false
-        }
+    } else {
+        println!(
+            "No source/target provided. Configure & start the job from the dashboard."
+        );
+        false
     };
 
     if auto_started && args.once {
