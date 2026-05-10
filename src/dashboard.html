@@ -170,6 +170,7 @@ Ok(batch)" class="w-full text-xs font-mono px-2 py-2 rounded border border-slate
             <div><label class="text-xs text-slate-600 dark:text-slate-400">End version</label><input name="end_version" type="number" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
             <div><label class="text-xs text-slate-600 dark:text-slate-400">Poll interval (s)</label><input name="poll_interval_secs" type="number" value="5" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
             <div><label class="text-xs text-slate-600 dark:text-slate-400">Max versions/batch</label><input name="max_versions_per_batch" type="number" value="10" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
+            <div><label class="text-xs text-slate-600 dark:text-slate-400" title="Soft cap on source rows per batch (estimated from add-action stats). 0 disables.">Max input rows/batch</label><input name="max_input_rows_per_batch" type="number" value="0" min="0" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
             <div><label class="text-xs text-slate-600 dark:text-slate-400">Read concurrency</label><input name="read_concurrency" type="number" value="8" class="mt-1 w-full text-sm px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
             <div><label class="text-xs text-slate-600 dark:text-slate-400">Checkpoint file</label><input name="checkpoint_file" value="./riffle-stream-ckpt.json" class="mt-1 w-full text-sm font-mono px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" /></div>
             <label class="col-span-2 inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300"><input type="checkbox" name="once" /> Run once (don't poll for new versions)</label>
@@ -613,6 +614,7 @@ function buildCli(tab) {
     if (o.end_version) parts.push(`--end-version ${o.end_version}`);
     if (o.poll_interval_secs) parts.push(`--poll-interval-secs ${o.poll_interval_secs}`);
     if (o.max_versions_per_batch) parts.push(`--max-versions-per-batch ${o.max_versions_per_batch}`);
+    if (o.max_input_rows_per_batch && Number(o.max_input_rows_per_batch) > 0) parts.push(`--max-input-rows-per-batch ${o.max_input_rows_per_batch}`);
     if (o.read_concurrency) parts.push(`--read-concurrency ${o.read_concurrency}`);
     if (o.azure_auth) parts.push(`--azure-auth ${o.azure_auth}`);
     if (o.checkpoint_file) parts.push(`--checkpoint-file "${o.checkpoint_file}"`);
@@ -724,7 +726,7 @@ streamForm.addEventListener('submit', async (e) => {
     return;
   }
   const o = formObject(streamForm);
-  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'read_concurrency'], ['once']);
+  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'max_input_rows_per_batch', 'read_concurrency'], ['once']);
   // Strip the inactive transform field so the server only sees the selected one.
   if (o.transform_kind !== 'sql') delete o.merge_transform_sql;
   if (o.transform_kind !== 'rust') delete o.merge_transform_rust;

@@ -173,6 +173,13 @@ pub struct SinkLaunchConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_max_versions")]
     pub max_versions_per_batch: usize,
+    /// Soft upper bound on source rows pulled per batch. The stream loop sums
+    /// per-version `numRecords` from add-actions in the source's `_delta_log`
+    /// and trims the version range so the running total stays under this cap.
+    /// Always includes at least one version (so we never block on a single
+    /// huge commit). 0 disables the cap.
+    #[serde(default)]
+    pub max_input_rows_per_batch: u64,
     #[serde(default = "default_read_concurrency")]
     pub read_concurrency: usize,
     #[serde(default = "default_azure_auth")]

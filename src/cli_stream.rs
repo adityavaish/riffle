@@ -15,6 +15,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use deltalake::{open_table_with_storage_options, DeltaTable};
+use object_store::ObjectStoreExt;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -98,6 +99,13 @@ pub struct StreamArgs {
 
     #[arg(long, default_value_t = 10)]
     max_versions_per_batch: usize,
+
+    /// Soft upper bound on source rows pulled per batch (estimated from
+    /// per-version `numRecords` in add-actions). Trims the version range so
+    /// the running total stays under this cap. Always includes at least one
+    /// version. 0 (default) disables the cap.
+    #[arg(long, default_value_t = 0)]
+    max_input_rows_per_batch: u64,
 
     /// Number of source parquet files to read in parallel during apply.
     #[arg(long, default_value_t = 8)]
@@ -299,6 +307,53 @@ impl Controller {
     }
 }
 
+/// Cheaply estimate the added-row count for a single source version by
+/// reading its commit JSON in `_delta_log` and summing `numRecords` from each
+/// `add` action's `stats` blob. Returns 0 if the commit has no add actions
+/// (e.g. metadata-only changes). This is a strict under-estimate of the
+/// CDF row count for update-heavy workloads (CDF emits preimage+postimage
+/// pairs), but it is exact for inserts and good enough as a soft bound.
+async fn estimate_added_rows(
+    source: &deltalake::DeltaTable,
+    version: i64,
+) -> Result<u64> {
+    use deltalake::logstore::commit_uri_from_version;
+    let log_store = source.log_store();
+    let commit_path = commit_uri_from_version(Some(version as u64));
+    let bytes = log_store
+        .object_store(None)
+        .get(&commit_path)
+        .await?
+        .bytes()
+        .await?;
+    let s = std::str::from_utf8(&bytes)?;
+    let mut total: u64 = 0;
+    for line in s.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let action: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(add) = action.get("add") {
+            if let Some(stats_val) = add.get("stats") {
+                let stats_str = stats_val
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| stats_val.to_string());
+                if let Ok(stats_v) = serde_json::from_str::<serde_json::Value>(&stats_str) {
+                    if let Some(n) = stats_v.get("numRecords").and_then(|x| x.as_u64()) {
+                        total = total.saturating_add(n);
+                    }
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
 async fn run_sink_loop(
     state: SharedState,
     sink_cfg: SinkConfig,
@@ -357,12 +412,13 @@ async fn run_sink_loop(
         },
     };
     tracing::info!(
-        "[stream] starting loop: source={} target={} mode={} poll_interval={}s max_versions_per_batch={} resume_after_v{}",
+        "[stream] starting loop: source={} target={} mode={} poll_interval={}s max_versions_per_batch={} max_input_rows_per_batch={} resume_after_v{}",
         launch.source_uri,
         sink_cfg.target_uri,
         sink_cfg.mode.name(),
         launch.poll_interval_secs,
         launch.max_versions_per_batch,
+        launch.max_input_rows_per_batch,
         last_sunk
     );
 
@@ -418,8 +474,44 @@ async fn run_sink_loop(
             if cancel.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let group_end =
+            let mut group_end =
                 (group_start + launch.max_versions_per_batch as i64 - 1).min(cap);
+            // Optional row-count cap: walk the candidate range, sum
+            // numRecords from each version's add-actions, and trim
+            // group_end at the largest k that keeps the total under the
+            // cap. Always include at least one version so a single
+            // huge commit cannot stall progress.
+            if launch.max_input_rows_per_batch > 0 && group_end > group_start {
+                let cap_rows = launch.max_input_rows_per_batch;
+                let mut running: u64 = 0;
+                let mut last_v: i64 = group_start;
+                for v in group_start..=group_end {
+                    match estimate_added_rows(&source, v).await {
+                        Ok(n) => {
+                            if v > group_start && running.saturating_add(n) > cap_rows {
+                                tracing::info!(
+                                    "[stream] row-cap trimmed group: v{}..=v{} would be {} rows (cap={}); stopping at v{}",
+                                    group_start, group_end, running.saturating_add(n), cap_rows, last_v
+                                );
+                                break;
+                            }
+                            running = running.saturating_add(n);
+                            last_v = v;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[stream] estimate_added_rows(v{}) failed: {:#}; falling back to version-cap only",
+                                v, e
+                            );
+                            last_v = group_end;
+                            break;
+                        }
+                    }
+                }
+                if last_v < group_end {
+                    group_end = last_v;
+                }
+            }
             let versions: Vec<i64> = (group_start..=group_end).collect();
             tracing::info!(
                 "[stream] applying versions v{}..=v{} ({} versions, mode={})",
@@ -851,6 +943,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
                 once: args.once,
                 poll_interval_secs: args.poll_interval_secs,
                 max_versions_per_batch: args.max_versions_per_batch,
+                max_input_rows_per_batch: args.max_input_rows_per_batch,
                 read_concurrency: args.read_concurrency,
                 azure_auth: args.azure_auth.clone(),
                 checkpoint_file: args.checkpoint_file.to_string_lossy().to_string(),
