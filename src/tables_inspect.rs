@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::config::{build_storage_options, register_handlers_for, Backend};
 use crate::util::{parse_table_uri, version_to_i64};
+use deltalake::table::config::TablePropertiesExt as _;
 
 #[derive(Serialize)]
 pub struct InspectResult {
@@ -26,6 +27,10 @@ pub struct InspectResult {
     pub schema: Vec<ColumnInfo>,
     pub partition_columns: Vec<String>,
     pub commits: Vec<CommitInfo>,
+    /// Whether `delta.enableChangeDataFeed=true` is set on the table. Riffle's
+    /// stream sink reads source tables exclusively via Change Data Feed, so
+    /// this drives the "Enable CDF" UI in the dashboard.
+    pub cdf_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -69,6 +74,8 @@ pub async fn inspect(uri: &str, azure_auth: &str) -> Result<InspectResult> {
         .collect();
 
     let partition_columns: Vec<String> = snapshot.metadata().partition_columns().to_vec();
+
+    let cdf_enabled = snapshot.table_config().enable_change_data_feed();
 
     // File-level stats: count files + sum num_records for an estimate.
     // delta-rs 0.32 dropped `file_actions_iter`; instead we project the
@@ -120,6 +127,7 @@ pub async fn inspect(uri: &str, azure_auth: &str) -> Result<InspectResult> {
         schema: cols,
         partition_columns,
         commits,
+        cdf_enabled,
     })
 }
 
@@ -236,5 +244,69 @@ pub async fn preview(
         columns,
         rows,
         limit,
+    })
+}
+
+#[derive(Serialize)]
+pub struct EnableCdfResult {
+    pub uri: String,
+    pub already_enabled: bool,
+    pub starting_version: i64,
+    pub new_version: i64,
+}
+
+/// Enable Delta Change Data Feed on an existing table.
+///
+/// Sets `delta.enableChangeDataFeed=true` via `set_tbl_properties`. delta-rs
+/// auto-bumps the protocol / adds the `changeDataFeed` writer feature for
+/// writer v7+ tables. If CDF is already enabled this is a fast no-op (no
+/// commit written).
+///
+/// Note: ALTER-style enable only takes effect for FUTURE commits — the change
+/// feed cannot replay versions written before CDF was turned on.
+pub async fn enable_cdf(uri: &str, azure_auth: &str) -> Result<EnableCdfResult> {
+    let backend = Backend::detect(uri);
+    register_handlers_for(&[backend]);
+    std::env::set_var("AZURE_AUTH", azure_auth);
+    let storage_options = build_storage_options(uri, azure_auth)
+        .with_context(|| format!("storage opts for {}", uri))?;
+
+    let table_url = parse_table_uri(uri)?;
+    let table = open_table_with_storage_options(table_url, storage_options.clone())
+        .await
+        .with_context(|| format!("open table {}", uri))?;
+    let starting_version = version_to_i64(table.version());
+
+    let already_enabled = table
+        .snapshot()
+        .ok()
+        .map(|s| s.table_config().enable_change_data_feed())
+        .unwrap_or(false);
+    if already_enabled {
+        return Ok(EnableCdfResult {
+            uri: uri.to_string(),
+            already_enabled: true,
+            starting_version,
+            new_version: starting_version,
+        });
+    }
+
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "delta.enableChangeDataFeed".to_string(),
+        "true".to_string(),
+    );
+    let updated = DeltaOps(table)
+        .set_tbl_properties()
+        .with_properties(props)
+        .with_raise_if_not_exists(false)
+        .await
+        .with_context(|| format!("set table properties on {}", uri))?;
+
+    Ok(EnableCdfResult {
+        uri: uri.to_string(),
+        already_enabled: false,
+        starting_version,
+        new_version: version_to_i64(updated.version()),
     })
 }

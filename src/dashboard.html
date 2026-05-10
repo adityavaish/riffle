@@ -377,11 +377,19 @@ Ok(batch)" class="w-full text-xs font-mono px-2 py-2 rounded border border-slate
     </form>
   </div>
 
-  <div id="inspectSummary" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3">
-    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Version</div><div id="insVersion" class="font-semibold text-lg mt-1">—</div></div>
-    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Files</div><div id="insFiles" class="font-semibold text-lg mt-1">—</div></div>
-    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Est. rows</div><div id="insRows" class="font-semibold text-lg mt-1">—</div></div>
-    <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Partitioned by</div><div id="insParts" class="font-semibold text-sm mt-1 break-all">—</div></div>
+  <div id="inspectSummary" class="hidden space-y-3">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Version</div><div id="insVersion" class="font-semibold text-lg mt-1">—</div></div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Files</div><div id="insFiles" class="font-semibold text-lg mt-1">—</div></div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Est. rows</div><div id="insRows" class="font-semibold text-lg mt-1">—</div></div>
+      <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3"><div class="text-xs text-slate-500 dark:text-slate-400">Partitioned by</div><div id="insParts" class="font-semibold text-sm mt-1 break-all">—</div></div>
+    </div>
+    <div id="insCdfRow" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3 flex flex-wrap items-center gap-3">
+      <div class="text-xs text-slate-500 dark:text-slate-400 mr-1">Change Data Feed</div>
+      <span id="insCdfPill" class="text-xs font-semibold px-2 py-0.5 rounded-full">—</span>
+      <span id="insCdfHint" class="text-xs text-slate-500 dark:text-slate-400 flex-1 min-w-[12rem]"></span>
+      <button id="insCdfEnableBtn" class="hidden px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50">Enable CDF</button>
+    </div>
   </div>
 
   <div id="inspectError" class="hidden text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded p-3 font-mono"></div>
@@ -778,6 +786,7 @@ document.getElementById('inspectForm').addEventListener('submit', async (e) => {
     ee.textContent = err.message;
     ee.classList.remove('hidden');
     document.getElementById('inspectSummary').classList.add('hidden');
+    document.getElementById('insCdfRow').classList.add('hidden');
     document.getElementById('inspectSchema').classList.add('hidden');
     document.getElementById('inspectCommits').classList.add('hidden');
     document.getElementById('inspectPreview').classList.add('hidden');
@@ -791,6 +800,7 @@ function renderInspect(d) {
   document.getElementById('insFiles').textContent = d.num_files;
   document.getElementById('insRows').textContent = (d.estimated_rows || 0).toLocaleString();
   document.getElementById('insParts').textContent = d.partition_columns?.length ? d.partition_columns.join(', ') : '(none)';
+  renderCdfRow(d);
   document.getElementById('inspectSummary').classList.remove('hidden');
 
   const tbody = document.getElementById('insSchemaBody');
@@ -821,6 +831,60 @@ function renderInspect(d) {
   document.getElementById('insPreviewMeta').textContent = '';
   document.getElementById('inspectPreview').dataset.uri = d.uri;
 }
+
+function renderCdfRow(d) {
+  const row = document.getElementById('insCdfRow');
+  const pill = document.getElementById('insCdfPill');
+  const hint = document.getElementById('insCdfHint');
+  const btn = document.getElementById('insCdfEnableBtn');
+  row.dataset.uri = d.uri;
+  row.classList.remove('hidden');
+  if (d.cdf_enabled) {
+    pill.textContent = '\u2713 Enabled';
+    pill.className = 'text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300';
+    hint.textContent = 'Source can be read by riffle stream sink (delta.enableChangeDataFeed=true).';
+    btn.classList.add('hidden');
+    btn.disabled = true;
+  } else {
+    pill.textContent = 'Disabled';
+    pill.className = 'text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300';
+    hint.textContent = 'Riffle stream sink reads only via Change Data Feed. Enabling adds a commit and applies to FUTURE versions only.';
+    btn.classList.remove('hidden');
+    btn.disabled = false;
+    btn.textContent = 'Enable CDF';
+  }
+}
+
+document.getElementById('insCdfEnableBtn').addEventListener('click', async () => {
+  const row = document.getElementById('insCdfRow');
+  const uri = row.dataset.uri;
+  if (!uri) return;
+  if (!confirm('Enable Delta Change Data Feed on this table?\n\nThis writes a new commit. CDF replay will only be available for FUTURE commits — older versions cannot be replayed as a change feed.')) return;
+  const auth = (document.querySelector('#inspectForm [name="azure_auth"]')?.value) || 'auto';
+  const btn = document.getElementById('insCdfEnableBtn');
+  btn.disabled = true;
+  btn.textContent = 'Enabling...';
+  try {
+    const r = await fetch('/api/tables/enable-cdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri, azure_auth: auth }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    if (data.already_enabled) {
+      toast(`CDF already enabled (v${data.starting_version})`, 'ok');
+    } else {
+      toast(`CDF enabled: v${data.starting_version} \u2192 v${data.new_version}`, 'ok');
+    }
+    // Re-inspect to refresh the version + CDF pill.
+    document.getElementById('inspectForm').requestSubmit();
+  } catch (err) {
+    toast('Enable CDF failed: ' + err.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Enable CDF';
+  }
+});
 
 async function loadPreview() {
   const wrap = document.getElementById('inspectPreview');

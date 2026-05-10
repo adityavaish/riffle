@@ -52,6 +52,7 @@ pub async fn run(
         .route("/api/create-table/stop", post(stop_create_table))
         .route("/api/tables/inspect", get(inspect_table))
         .route("/api/tables/preview", get(preview_table))
+        .route("/api/tables/enable-cdf", post(enable_cdf_table))
         .route("/api/transform/compile", post(compile_transform))
         .route("/api/logs", get(logs_stream))
         .route("/api/logs/snapshot", get(logs_snapshot))
@@ -273,6 +274,25 @@ async fn preview_table(
     let limit = q.limit.clamp(1, 1000);
     let where_opt = if q.r#where.trim().is_empty() { None } else { Some(q.r#where.as_str()) };
     match tables_inspect::preview(&q.uri, &q.azure_auth, limit, where_opt).await {
+        Ok(r) => Ok(axum::Json(r)),
+        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, format!("{:#}", e))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct EnableCdfReq {
+    uri: String,
+    #[serde(default = "default_auth")]
+    azure_auth: String,
+}
+
+async fn enable_cdf_table(
+    axum::Json(req): axum::Json<EnableCdfReq>,
+) -> Result<axum::Json<tables_inspect::EnableCdfResult>, (axum::http::StatusCode, String)> {
+    if req.uri.trim().is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "uri is required".into()));
+    }
+    match tables_inspect::enable_cdf(&req.uri, &req.azure_auth).await {
         Ok(r) => Ok(axum::Json(r)),
         Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, format!("{:#}", e))),
     }
