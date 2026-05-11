@@ -275,7 +275,11 @@ impl EventHubReader {
             cfg.consumer_group,
             partitions.join(",")
         );
-        let buffer_size = cfg.max_events_per_batch.max(1024).min(100_000);
+        // Buffer scales with max_events_per_batch so the partition tasks can
+        // keep pushing while the consumer does merges. Without this, the
+        // mpsc backs up and partition tasks block on send() — causing tiny
+        // post-merge batches when the merge took a long time.
+        let buffer_size = cfg.max_events_per_batch.max(1024);
         let (tx, rx) = mpsc::channel::<EventRow>(buffer_size);
         let mut tasks = Vec::with_capacity(partitions.len());
         for pid in partitions {
@@ -340,27 +344,56 @@ impl EventHubReader {
         })
     }
 
-    /// Drain events for up to `timeout_secs` or until `max_events` are received,
-    /// whichever first. Returns the assembled RecordBatch (or `None` if no
-    /// events arrived) and the latest sequence number observed per partition.
+    /// Drain events into a single batch. Flush conditions (whichever first):
+    ///   * `rows.len() >= max_events`,
+    ///   * `timeout` elapsed since this call started,
+    ///   * an "idle gap" of `IDLE_GAP_MS` with no new events arriving (so
+    ///     when the source is bursty/idle we don't sit on collected rows
+    ///     for the full `timeout`),
+    ///   * channel closed or cancel flag set.
     pub async fn next_batch(
         &mut self,
         max_events: usize,
         timeout: Duration,
     ) -> Result<Option<EventHubBatch>> {
+        /// Time to wait for the next event AFTER at least one has been
+        /// received before declaring the burst over and flushing. 300ms is
+        /// long enough to bridge typical AMQP credit refill latency.
+        const IDLE_GAP_MS: u64 = 300;
+
         let deadline = Instant::now() + timeout;
-        let mut rows: Vec<EventRow> = Vec::with_capacity(max_events.min(8192));
+        let mut rows: Vec<EventRow> = Vec::with_capacity(max_events.min(65_536));
         let mut latest_seq: HashMap<String, i64> = HashMap::new();
-        // Wait for the first event up to the full timeout (so we don't
-        // spin when idle), then drain until count or deadline.
+
+        // Phase 1: wait up to the full timeout for the first event so we
+        // don't spin when fully idle.
+        let first = tokio::time::timeout(timeout, self.rx.recv()).await;
+        match first {
+            Ok(Some(row)) => {
+                let pid = row.partition_id.clone();
+                let seq = row.sequence_number;
+                rows.push(row);
+                latest_seq.insert(pid, seq);
+            }
+            Ok(None) | Err(_) => return Ok(None),
+        }
+
+        // Phase 2: keep draining until the deadline, the cap, or an idle gap.
+        let idle_gap = Duration::from_millis(IDLE_GAP_MS);
         loop {
+            if rows.len() >= max_events {
+                break;
+            }
+            if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             let now = Instant::now();
             if now >= deadline {
                 break;
             }
-            let remaining = deadline - now;
-            let recv = tokio::time::timeout(remaining, self.rx.recv()).await;
-            match recv {
+            // Wait at most `min(idle_gap, deadline - now)` for the next event.
+            let wait = idle_gap.min(deadline - now);
+            match tokio::time::timeout(wait, self.rx.recv()).await {
                 Ok(Some(row)) => {
                     let pid = row.partition_id.clone();
                     let seq = row.sequence_number;
@@ -369,20 +402,15 @@ impl EventHubReader {
                     if seq > *entry {
                         *entry = seq;
                     }
-                    if rows.len() >= max_events {
-                        break;
-                    }
                 }
-                Ok(None) => {
-                    // All senders dropped — partitions ended or cancelled.
+                Ok(None) => break, // channel closed
+                Err(_) => {
+                    // idle gap hit — flush the burst.
                     break;
                 }
-                Err(_) => break, // timeout
-            }
-            if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
             }
         }
+
         if rows.is_empty() {
             return Ok(None);
         }
