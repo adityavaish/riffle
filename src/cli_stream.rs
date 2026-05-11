@@ -75,6 +75,11 @@ pub struct StreamArgs {
     #[arg(long, default_value = "")]
     eh_partitions: String,
 
+    /// AMQP prefetch count per partition receiver. Higher = better throughput
+    /// when catching up on backlog at the cost of memory per partition.
+    #[arg(long, default_value_t = 1000)]
+    eh_prefetch: u32,
+
     /// Target Delta table URI. Optional — if omitted, configure via dashboard.
     #[arg(long)]
     target_uri: Option<String>,
@@ -763,6 +768,7 @@ async fn run_eventhub_loop(
         max_events_per_batch: launch.eh_max_events_per_batch.max(1),
         batch_timeout_secs: launch.eh_batch_timeout_secs.max(1),
         partitions,
+        prefetch: if launch.eh_prefetch == 0 { 1000 } else { launch.eh_prefetch },
     };
 
     // Resume offsets — refuse on signature mismatch.
@@ -1221,6 +1227,7 @@ pub async fn run(args: StreamArgs) -> Result<()> {
             eh_max_events_per_batch: args.eh_max_events_per_batch,
             eh_batch_timeout_secs: args.eh_batch_timeout_secs,
             eh_partitions: args.eh_partitions.clone(),
+            eh_prefetch: args.eh_prefetch,
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         sink_tx.send(SinkCommand::Start(cfg, reply_tx)).await.ok();

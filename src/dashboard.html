@@ -145,6 +145,11 @@
               <input name="eh_batch_timeout_secs" type="number" value="5" min="1"
                      class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
             </div>
+            <div>
+              <label class="text-xs font-medium text-slate-600 dark:text-slate-400" title="AMQP prefetch per partition. Higher = better catch-up throughput, more memory.">Prefetch / partition</label>
+              <input name="eh_prefetch" type="number" value="1000" min="1"
+                     class="mt-1 w-full text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+            </div>
           </div>
         </div>
 

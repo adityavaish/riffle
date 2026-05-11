@@ -216,6 +216,10 @@ pub struct SinkLaunchConfig {
     /// Optional comma-separated explicit partition list. Empty = all partitions.
     #[serde(default)]
     pub eh_partitions: String,
+    /// AMQP prefetch count per partition receiver. Higher = better throughput
+    /// for backlog catch-up at the cost of memory per partition. Default 1000.
+    #[serde(default = "default_eh_prefetch")]
+    pub eh_prefetch: u32,
 }
 
 fn default_poll_interval() -> u64 { 5 }
@@ -228,6 +232,7 @@ fn default_eh_cg() -> String { "$Default".to_string() }
 fn default_eh_initial_position() -> String { "latest".to_string() }
 fn default_eh_max_events() -> usize { 5_000 }
 fn default_eh_batch_timeout() -> u64 { 5 }
+fn default_eh_prefetch() -> u32 { 1000 }
 
 /// Commands sent from the web layer to the sink controller task.
 #[derive(Debug)]

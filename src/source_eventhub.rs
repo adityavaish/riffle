@@ -80,6 +80,9 @@ pub struct EventHubSourceConfig {
     /// Optional explicit list of partition IDs to consume. When `None` the
     /// hub's full partition list is auto-discovered.
     pub partitions: Option<Vec<String>>,
+    /// AMQP prefetch count per partition receiver. Higher = better throughput
+    /// for backlog catch-up at the cost of memory per partition. Default 1000.
+    pub prefetch: u32,
 }
 
 impl EventHubSourceConfig {
@@ -282,6 +285,7 @@ impl EventHubReader {
                     pid.clone(),
                     Some(OpenReceiverOptions {
                         start_position: Some(pos),
+                        prefetch: Some(cfg.prefetch.max(1)),
                         ..Default::default()
                     }),
                 )
