@@ -397,13 +397,17 @@ pub async fn apply_with_batches(
             .await?
         }
     };
+    let duration_ms = t_write.elapsed().as_millis() as u64;
     tracing::debug!(
         "[sink] {} write complete in {}ms (target_version=v{})",
         cfg.mode.name(),
-        t_write.elapsed().as_millis(),
+        duration_ms,
         outcome.target_version
     );
-    Ok(outcome)
+    Ok(SinkOutcome {
+        duration_ms,
+        ..outcome
+    })
 }
 
 async fn apply_append(
