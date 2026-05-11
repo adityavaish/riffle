@@ -395,7 +395,15 @@ impl EventHubReader {
     }
 
     pub async fn close(self) {
-        let _ = self.client.close().await;
+        // Bound the AMQP shutdown so a slow broker close doesn't blow past
+        // the controller's 10s stop budget. 3s is plenty; partitions are
+        // already draining via the cancel flag, and dropping the client is
+        // safe even if the close handshake hasn't completed yet.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.client.close(),
+        )
+        .await;
     }
 }
 

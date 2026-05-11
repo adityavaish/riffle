@@ -376,18 +376,21 @@ impl Controller {
         // Mark as stopping immediately so the UI can react.
         let state = self.state.clone();
         let handle = self.handle.take();
+        let gate = self.gate.clone();
         self.cancel = None;
         tokio::spawn(async move {
             {
                 let mut s = state.lock().await;
                 s.sink.status = "Stopping...".to_string();
             }
+            let mut aborted = false;
             if let Some(h) = handle {
                 tracing::info!("[stream] stop requested; waiting up to 10s for cooperative cancel");
                 let abort_handle = h.abort_handle();
                 if tokio::time::timeout(Duration::from_secs(10), h).await.is_err() {
                     tracing::warn!("[stream] sink loop did not exit within 10s (likely mid-merge); aborting hard");
                     abort_handle.abort();
+                    aborted = true;
                     // Wait long enough for the orphaned heartbeat OS thread to
                     // see its cancellation flag and exit (5s sleep + slack).
                     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -395,9 +398,19 @@ impl Controller {
                     tracing::info!("[stream] sink loop exited cleanly");
                 }
             }
-            let mut s = state.lock().await;
-            s.sink.status = "Stopped".to_string();
-            s.sink.running = false;
+            {
+                let mut s = state.lock().await;
+                s.sink.status = "Stopped".to_string();
+                s.sink.running = false;
+            }
+            // When we aborted the task hard, its `gate.release` call was killed
+            // before it could run — so we have to release the gate ourselves
+            // here, otherwise the dashboard would show "stream running" forever
+            // and subsequent Start clicks would fail with "already running".
+            if aborted {
+                tracing::info!("[stream] releasing gate after hard abort");
+                gate.release("stream").await;
+            }
         });
         Ok(())
     }
