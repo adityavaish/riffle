@@ -819,7 +819,7 @@ streamForm.addEventListener('submit', async (e) => {
     return;
   }
   const o = formObject(streamForm);
-  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'max_input_rows_per_batch', 'read_concurrency', 'eh_max_events_per_batch', 'eh_batch_timeout_secs'], ['once']);
+  coerce(o, ['start_version', 'end_version', 'poll_interval_secs', 'max_versions_per_batch', 'max_input_rows_per_batch', 'read_concurrency', 'eh_max_events_per_batch', 'eh_batch_timeout_secs', 'eh_prefetch'], ['once']);
   // Strip the inactive transform field so the server only sees the selected one.
   if (o.transform_kind !== 'sql') delete o.merge_transform_sql;
   if (o.transform_kind !== 'rust') delete o.merge_transform_rust;
@@ -833,7 +833,7 @@ streamForm.addEventListener('submit', async (e) => {
   } else {
     delete o.eh_namespace; delete o.eh_event_hub; delete o.eh_consumer_group;
     delete o.eh_initial_position; delete o.eh_max_events_per_batch;
-    delete o.eh_batch_timeout_secs; delete o.eh_partitions;
+    delete o.eh_batch_timeout_secs; delete o.eh_partitions; delete o.eh_prefetch;
   }
   streamRunBtn.disabled = true;
   try {
