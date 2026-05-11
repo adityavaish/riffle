@@ -9,7 +9,7 @@
 //! | partition_id    | Utf8                  |
 //! | offset          | Utf8 (nullable)       |
 //! | sequence_number | Int64                 |
-//! | enqueued_time   | Timestamp(ms, "UTC")  |
+//! | enqueued_time   | Timestamp(us, "UTC")  |
 //! | body            | Utf8 (UTF-8 lossy)    |
 //! | properties      | Utf8 (JSON)           |
 //!
@@ -26,7 +26,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{
-    ArrayRef, Int64Builder, RecordBatch, StringBuilder, TimestampMillisecondBuilder,
+    ArrayRef, Int64Builder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef as ArrowSchemaRef, TimeUnit};
 use azure_identity::DeveloperToolsCredential;
@@ -99,7 +99,7 @@ pub fn event_hub_arrow_schema() -> ArrowSchemaRef {
         Field::new("sequence_number", DataType::Int64, false),
         Field::new(
             "enqueued_time",
-            DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC"))),
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
             true,
         ),
         Field::new("body", DataType::Utf8, true),
@@ -114,15 +114,15 @@ struct EventRow {
     partition_id: String,
     offset: Option<String>,
     sequence_number: i64,
-    enqueued_ms: Option<i64>,
+    enqueued_us: Option<i64>,
     body: String,
     properties: Option<String>,
 }
 
-fn system_time_to_ms(ts: SystemTime) -> Option<i64> {
+fn system_time_to_us(ts: SystemTime) -> Option<i64> {
     ts.duration_since(UNIX_EPOCH).ok().and_then(|d| {
-        let ms = d.as_millis();
-        if ms > i64::MAX as u128 { None } else { Some(ms as i64) }
+        let us = d.as_micros();
+        if us > i64::MAX as u128 { None } else { Some(us as i64) }
     })
 }
 
@@ -131,7 +131,7 @@ fn build_record_batch(rows: &[EventRow]) -> Result<RecordBatch> {
     let mut partition_id = StringBuilder::with_capacity(rows.len(), rows.len() * 4);
     let mut offset = StringBuilder::with_capacity(rows.len(), rows.len() * 16);
     let mut seq = Int64Builder::with_capacity(rows.len());
-    let mut ts = TimestampMillisecondBuilder::with_capacity(rows.len())
+    let mut ts = TimestampMicrosecondBuilder::with_capacity(rows.len())
         .with_timezone("UTC");
     let mut body = StringBuilder::with_capacity(rows.len(), rows.len() * 64);
     let mut props = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
@@ -142,7 +142,7 @@ fn build_record_batch(rows: &[EventRow]) -> Result<RecordBatch> {
             None => offset.append_null(),
         }
         seq.append_value(r.sequence_number);
-        match r.enqueued_ms {
+        match r.enqueued_us {
             Some(t) => ts.append_value(t),
             None => ts.append_null(),
         }
@@ -433,12 +433,12 @@ fn received_to_row(
         });
     let offset = ev.offset().clone();
     let sequence_number = ev.sequence_number().unwrap_or(-1);
-    let enqueued_ms = ev.enqueued_time().and_then(system_time_to_ms);
+    let enqueued_us = ev.enqueued_time().and_then(system_time_to_us);
     EventRow {
         partition_id: partition_id.to_string(),
         offset,
         sequence_number,
-        enqueued_ms,
+        enqueued_us,
         body: body_str,
         properties: props,
     }
