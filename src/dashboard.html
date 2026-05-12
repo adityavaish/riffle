@@ -458,6 +458,46 @@ Ok(batch)" class="w-full text-xs font-mono px-2 py-2 rounded border border-slate
 
   <div id="inspectError" class="hidden text-xs text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded p-3 font-mono"></div>
 
+  <div id="inspectMaintenance" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-semibold">Maintenance</h3>
+      <span class="text-xs text-slate-500 dark:text-slate-400">Compact &middot; Z-Order &middot; Vacuum</span>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div class="border border-slate-200 dark:border-slate-800 rounded p-3 space-y-2">
+        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">Compact (OPTIMIZE)</div>
+        <div class="text-[11px] text-slate-500 dark:text-slate-400">Bin-pack small files into target-size parquet.</div>
+        <label class="text-[11px] text-slate-500 dark:text-slate-400 block">Target file size (MB)
+          <input id="mntCompactTargetMb" type="number" min="1" value="128" class="mt-0.5 w-full text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+        </label>
+        <button id="mntCompactBtn" class="w-full px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50">Run Compact</button>
+      </div>
+      <div class="border border-slate-200 dark:border-slate-800 rounded p-3 space-y-2">
+        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">Z-Order</div>
+        <div class="text-[11px] text-slate-500 dark:text-slate-400">Cluster file layout by columns; speeds up filters on them.</div>
+        <label class="text-[11px] text-slate-500 dark:text-slate-400 block">Columns (comma-sep)
+          <input id="mntZorderCols" placeholder="event_id, event_ts" class="mt-0.5 w-full text-xs font-mono px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+        </label>
+        <button id="mntZorderBtn" class="w-full px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50">Run Z-Order</button>
+      </div>
+      <div class="border border-slate-200 dark:border-slate-800 rounded p-3 space-y-2">
+        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">Vacuum</div>
+        <div class="text-[11px] text-slate-500 dark:text-slate-400">Delete tombstoned files older than the retention window.</div>
+        <label class="text-[11px] text-slate-500 dark:text-slate-400 block">Retention (hours)
+          <input id="mntVacuumHours" type="number" min="0" value="168" class="mt-0.5 w-full text-xs px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+        </label>
+        <label class="text-[11px] text-slate-700 dark:text-slate-300 flex items-center gap-1">
+          <input id="mntVacuumDryRun" type="checkbox" checked /> dry run
+        </label>
+        <label class="text-[11px] text-amber-700 dark:text-amber-300 flex items-center gap-1">
+          <input id="mntVacuumUnsafe" type="checkbox" /> allow retention &lt; 168h (UNSAFE)
+        </label>
+        <button id="mntVacuumBtn" class="w-full px-3 py-1.5 text-xs font-medium rounded-md bg-rose-600 hover:bg-rose-700 text-white disabled:opacity-50">Run Vacuum</button>
+      </div>
+    </div>
+    <pre id="mntOutput" class="hidden whitespace-pre-wrap text-[11px] font-mono p-2 rounded border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 max-h-56 overflow-auto"></pre>
+  </div>
+
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
     <details id="inspectSchema" class="hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden group">
       <summary class="cursor-pointer px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 select-none list-none">
@@ -893,6 +933,7 @@ document.getElementById('inspectForm').addEventListener('submit', async (e) => {
     ee.classList.remove('hidden');
     document.getElementById('inspectSummary').classList.add('hidden');
     document.getElementById('insCdfRow').classList.add('hidden');
+    document.getElementById('inspectMaintenance').classList.add('hidden');
     document.getElementById('inspectSchema').classList.add('hidden');
     document.getElementById('inspectCommits').classList.add('hidden');
     document.getElementById('inspectPreview').classList.add('hidden');
@@ -908,6 +949,9 @@ function renderInspect(d) {
   document.getElementById('insParts').textContent = d.partition_columns?.length ? d.partition_columns.join(', ') : '(none)';
   renderCdfRow(d);
   document.getElementById('inspectSummary').classList.remove('hidden');
+  const mnt = document.getElementById('inspectMaintenance');
+  mnt.dataset.uri = d.uri;
+  mnt.classList.remove('hidden');
 
   const tbody = document.getElementById('insSchemaBody');
   tbody.innerHTML = '';
@@ -990,6 +1034,71 @@ document.getElementById('insCdfEnableBtn').addEventListener('click', async () =>
     btn.disabled = false;
     btn.textContent = 'Enable CDF';
   }
+});
+
+// ---------- maintenance (compact / zorder / vacuum) ----------
+function mntCurrentUri() {
+  return document.getElementById('inspectMaintenance').dataset.uri || '';
+}
+function mntCurrentAuth() {
+  return (document.querySelector('#inspectForm [name="azure_auth"]')?.value) || 'auto';
+}
+function mntShowOutput(obj) {
+  const out = document.getElementById('mntOutput');
+  out.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  out.classList.remove('hidden');
+}
+async function mntRun(label, btnId, payload, endpoint) {
+  const uri = mntCurrentUri();
+  if (!uri) { toast('Inspect a table first', 'error'); return; }
+  const btn = document.getElementById(btnId);
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = label + '...';
+  try {
+    const body = Object.assign({ uri, azure_auth: mntCurrentAuth() }, payload);
+    const r = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    mntShowOutput(data);
+    toast(label + ' done', 'ok');
+    // Re-inspect for the new version/file count.
+    document.getElementById('inspectForm').requestSubmit();
+  } catch (err) {
+    mntShowOutput('ERROR: ' + err.message);
+    toast(label + ' failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+document.getElementById('mntCompactBtn').addEventListener('click', () => {
+  const mb = parseInt(document.getElementById('mntCompactTargetMb').value || '0', 10);
+  const bytes = mb > 0 ? mb * 1024 * 1024 : 0;
+  mntRun('Compact', 'mntCompactBtn', {
+    zorder_by: '',
+    target_file_size_bytes: bytes || null,
+  }, '/api/tables/optimize');
+});
+document.getElementById('mntZorderBtn').addEventListener('click', () => {
+  const cols = (document.getElementById('mntZorderCols').value || '').trim();
+  if (!cols) { toast('Specify at least one z-order column', 'error'); return; }
+  mntRun('Z-Order', 'mntZorderBtn', { zorder_by: cols }, '/api/tables/optimize');
+});
+document.getElementById('mntVacuumBtn').addEventListener('click', () => {
+  const hours = parseInt(document.getElementById('mntVacuumHours').value || '168', 10);
+  const dry = document.getElementById('mntVacuumDryRun').checked;
+  const allowUnsafe = document.getElementById('mntVacuumUnsafe').checked;
+  if (!dry && !confirm(`Vacuum will permanently delete files older than ${hours}h. Continue?`)) return;
+  mntRun(dry ? 'Vacuum (dry-run)' : 'Vacuum', 'mntVacuumBtn', {
+    retention_hours: hours,
+    dry_run: dry,
+    enforce_retention: !allowUnsafe,
+  }, '/api/tables/vacuum');
 });
 
 async function loadPreview() {

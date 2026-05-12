@@ -15,6 +15,7 @@ use crate::state::{
     SinkLaunchConfig, TunableConfig,
 };
 use crate::tables_inspect;
+use crate::maintenance;
 
 static DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
@@ -53,6 +54,8 @@ pub async fn run(
         .route("/api/tables/inspect", get(inspect_table))
         .route("/api/tables/preview", get(preview_table))
         .route("/api/tables/enable-cdf", post(enable_cdf_table))
+        .route("/api/tables/optimize", post(optimize_table_route))
+        .route("/api/tables/vacuum", post(vacuum_table_route))
         .route("/api/transform/compile", post(compile_transform))
         .route("/api/logs", get(logs_stream))
         .route("/api/logs/snapshot", get(logs_snapshot))
@@ -293,6 +296,87 @@ async fn enable_cdf_table(
         return Err((axum::http::StatusCode::BAD_REQUEST, "uri is required".into()));
     }
     match tables_inspect::enable_cdf(&req.uri, &req.azure_auth).await {
+        Ok(r) => Ok(axum::Json(r)),
+        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, format!("{:#}", e))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OptimizeReq {
+    uri: String,
+    #[serde(default = "default_auth")]
+    azure_auth: String,
+    /// Comma-separated z-order columns; empty = plain compaction.
+    #[serde(default)]
+    zorder_by: String,
+    /// Target file size in bytes; None/0 = delta-rs default.
+    #[serde(default)]
+    target_file_size_bytes: Option<u64>,
+    #[serde(default)]
+    max_concurrent_tasks: Option<usize>,
+}
+
+async fn optimize_table_route(
+    axum::Json(req): axum::Json<OptimizeReq>,
+) -> Result<axum::Json<maintenance::OptimizeResult>, (axum::http::StatusCode, String)> {
+    if req.uri.trim().is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "uri is required".into()));
+    }
+    let cols: Vec<String> = req
+        .zorder_by
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let target = req.target_file_size_bytes.filter(|n| *n > 0);
+    match maintenance::optimize(
+        &req.uri,
+        &req.azure_auth,
+        cols,
+        target,
+        req.max_concurrent_tasks,
+    )
+    .await
+    {
+        Ok(r) => Ok(axum::Json(r)),
+        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, format!("{:#}", e))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct VacuumReq {
+    uri: String,
+    #[serde(default = "default_auth")]
+    azure_auth: String,
+    /// Minimum age in hours. Default 168h (7 days, the Delta-protocol safe minimum).
+    #[serde(default = "default_vacuum_retention")]
+    retention_hours: u64,
+    #[serde(default = "default_dry_run")]
+    dry_run: bool,
+    /// When false, allows retention below 168h (UNSAFE — may corrupt readers).
+    #[serde(default = "default_true")]
+    enforce_retention: bool,
+}
+
+fn default_vacuum_retention() -> u64 { 168 }
+fn default_dry_run() -> bool { true }
+fn default_true() -> bool { true }
+
+async fn vacuum_table_route(
+    axum::Json(req): axum::Json<VacuumReq>,
+) -> Result<axum::Json<maintenance::VacuumResult>, (axum::http::StatusCode, String)> {
+    if req.uri.trim().is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "uri is required".into()));
+    }
+    match maintenance::vacuum(
+        &req.uri,
+        &req.azure_auth,
+        req.retention_hours,
+        req.dry_run,
+        req.enforce_retention,
+    )
+    .await
+    {
         Ok(r) => Ok(axum::Json(r)),
         Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, format!("{:#}", e))),
     }
